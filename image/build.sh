@@ -39,8 +39,8 @@ mount_builder() {
   mount -t proc proc "$B/proc"; mount -t sysfs sysfs "$B/sys"; mount -t tmpfs tmpfs "$B/run"
 }
 
-BUILDER_PKGS="debootstrap debian-archive-keyring squashfs-tools xorriso mtools grub-common grub-pc-bin
-  grub-efi-amd64-bin faketime rustc cargo gcc libc6-dev ca-certificates"
+BUILDER_PKGS="debootstrap debian-archive-keyring squashfs-tools cryptsetup-bin systemd-ukify systemd-boot-efi
+  python3-pefile sbsigntool efitools xorriso mtools dosfstools faketime rustc cargo gcc libc6-dev ca-certificates"
 READY=$B/.ready-$SNAPSHOT-$(echo "$BUILDER_PKGS" | sha256sum | cut -c1-12)
 
 if [ ! -f "$READY" ]; then
@@ -58,10 +58,13 @@ if [ ! -f "$READY" ]; then
 fi
 
 cp /etc/resolv.conf "$B/etc/resolv.conf"
+# An interrupted earlier run can leave mounts behind; clear them, and never let
+# a delete cross into a mounted filesystem.
+unmount_all
 mount_builder
 
 # Sources: the tracked files of the working tree, always at /build/src.
-rm -rf "$B/build"; mkdir -p "$B/build/src"
+rm -rf --one-file-system "$B/build"; mkdir -p "$B/build/src"
 GIT="git -c safe.directory=* -C $REPO"
 $GIT ls-files -z | (cd "$REPO" && tar --null -T - -cf -) | tar -xf - -C "$B/build/src"
 COMMIT=$($GIT rev-parse HEAD)

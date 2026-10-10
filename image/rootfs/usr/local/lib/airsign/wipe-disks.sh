@@ -12,6 +12,12 @@
 # covered by the zero pass.
 set -u
 
+# Mirror everything shown (prompts included) to the serial port when there is
+# one, so the wipe can be driven and checked from a test harness.
+if [ -w /dev/ttyS0 ] && stty -F /dev/ttyS0 115200 >/dev/null 2>&1; then
+  exec > >(tee -a /dev/ttyS0) 2>&1
+fi
+
 for m in ahci nvme mmc_block sdhci_pci virtio_blk ata_piix; do modprobe "$m" 2>/dev/null; done
 udevadm settle 2>/dev/null || sleep 3
 

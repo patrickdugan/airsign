@@ -1,17 +1,41 @@
 #!/usr/bin/env python3
-"""Boot the airsign ISO in QEMU the way it boots on a laptop: from a USB stick,
-with a SATA disk, an NVMe disk and two network cards attached.
+"""Verified-boot test suite for the airsign image, under QEMU/KVM with OVMF.
 
-  A  self-test entry (serial): properties checked from inside; the QR drawn on
-     tty1 is captured with screendump and decoded with zbarimg.
-  B  UEFI + GRUB default entry: a whole signing session typed on the virtual
-     keyboard (seed by 4-letter prefixes, request as two-letter words), the
-     signature QR photographed and decoded, then "Shut down" must power off.
-  C  legacy BIOS + GRUB: reaches the menu and powers off from it.
-  D  wipe entry: confirms each internal disk over the console, then the host
-     checks both disk images read back as zeros.
+usage: test_qemu.py <build-out-dir> <keys-dir> <outdir> [tests]
 
-usage: test_qemu.py ISO OUTDIR    (needs qemu-system-x86_64, xorriso, zbarimg, OVMF)
+  <build-out-dir>  output of image/build.sh (unsigned pieces + unsigned ISO)
+  <keys-dir>       holds owner/ and attacker/ key sets made by image/keys.sh
+  tests            letters, default "SIWTFU"
+
+Every boot is from a virtual USB stick with a SATA disk, an NVMe disk and two
+network cards attached. Unless noted, the firmware is OVMF with Secure Boot on
+and ONLY the owner's PK/KEK/db enrolled (no Microsoft keys).
+
+  S  self-test entry: in-image checks (Secure Boot, dm-verity root hash, no
+     network, no disks, ...) and a QR drawn on the text console, photographed
+     with screendump and decoded with zbarimg
+  I  default entry: a full signing session typed on the virtual keyboard; the
+     signature QR must decode to Bitcoin Core's signatures; "Shut down" powers off
+  W  wipe entry, driven over its serial mirror: both disk images must read back
+     as zeros
+  T  tampered system image, refused by the initramfs check:
+     T1 one byte of the system image changed  -> powers off
+     T2 the .verity hash tree deleted          -> powers off
+        (live-boot on its own would mount the image unverified)
+  F  tampered or foreign boot code, refused by the firmware. Needs firmware
+     that enforces Secure Boot: OVMF_SMM=1 (and, under nested virtualization
+     such as WSL2, QEMU_ACCEL=tcg):
+     T3 the signed UKI changed after signing
+     T4 boot code signed with someone else's key
+     T5 the unsigned ISO
+  K  firmware in Setup Mode + signed stick: "Enroll Secure Boot keys: airsign"
+     from the menu, then the next boot must run with Secure Boot on (SMM build)
+  U  the unsigned ISO with Secure Boot off still boots and still verifies the
+     image (the Secure Boot check is expected to report off)
+  X  explore: screenshots of the first seconds of a signed boot (calibration)
+
+Needs: qemu-system-x86_64 (KVM), OVMF (secboot build), virt-fw-vars, zbarimg,
+xorriso, and what image/sign.sh and image/make-iso.sh need.
 """
 import os
 import re
@@ -22,15 +46,32 @@ import sys
 import tempfile
 import time
 
-ISO, OUT = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+BUILD = os.path.abspath(sys.argv[1])
+KEYS = os.path.abspath(sys.argv[2])
+OUT = os.path.abspath(sys.argv[3])
+WHICH = sys.argv[4] if len(sys.argv) > 4 else "SIWTFU"
 HERE = os.path.dirname(os.path.abspath(__file__))
-AIRSIGN = os.environ.get("AIRSIGN", "/root/build/airsign-cargo/x86_64-unknown-linux-musl/release/airsign")
+AIRSIGN = os.environ.get("AIRSIGN", os.path.join(BUILD, "airsign"))
+# OVMF's "secboot" build also requires SMM, which protects the variable store
+# from the OS. KVM under nested virtualization (WSL2 on Hyper-V) fails on SMM
+# entry, so by default use the build that enforces Secure Boot signature checks
+# the same way but without SMM. OVMF_SMM=1 selects the SMM build on bare metal.
+SMM = os.environ.get("OVMF_SMM") == "1"
+# QEMU_ACCEL=tcg runs without KVM (needed for SMM on such hosts); everything is
+# then several times slower, so timeouts scale by SLOW.
+ACCEL = os.environ.get("QEMU_ACCEL", "kvm")
+SLOW = 6 if ACCEL == "tcg" else 1
+CODE = "/usr/share/OVMF/OVMF_CODE_4M.secboot.fd" if SMM else "/usr/share/OVMF/OVMF_CODE_4M.fd"
+BLANK_VARS = "/usr/share/OVMF/OVMF_VARS_4M.fd"
 os.makedirs(OUT, exist_ok=True)
 W = tempfile.mkdtemp(prefix="airsign-qemu-")
 SEED_PREFIXES = "aban " * 11 + "abou"
 FIXTURE = open(os.path.join(HERE, "rootfs/usr/local/lib/airsign/selftest.sh")).read()
 REQ = re.search(r"^REQ=(\S+)", FIXTURE, re.M).group(1)
 SIG = re.search(r"^SIG=(\S+)", FIXTURE, re.M).group(1)
+ROOTHASH = open(os.path.join(BUILD, "ROOTHASH")).read().strip()
+# systemd-boot lists the three UKI profiles in order.
+ENTRY = {"signer": 0, "selftest": 1, "wipe": 2}
 results = []
 
 
@@ -39,38 +80,79 @@ def record(name, ok, detail=""):
     print(("PASS  " if ok else "FAIL  ") + name + (f"  ({detail})" if detail else ""), flush=True)
 
 
-def run(*cmd, **kw):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw).stdout
+def run(*cmd, env=None):
+    e = dict(os.environ, **(env or {}))
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, env=e).stdout
 
 
-run("xorriso", "-osirrox", "on", "-indev", ISO,
-    "-extract", "/live/vmlinuz", f"{W}/vmlinuz",
-    "-extract", "/live/initrd.img", f"{W}/initrd.img",
-    "-extract", "/boot/grub/grub.cfg", f"{W}/grub.cfg")
-grub = open(f"{W}/grub.cfg").read()
-COMMON = re.search(r'^set common="(.*)"', grub, re.M).group(1)
-BLOCK = re.search(r'^set block="(.*)"', grub, re.M).group(1)
+# --- artifacts ------------------------------------------------------------------------------
+def sign(keyset, iso, trees=None):
+    env = {"SUMS": os.path.join(BUILD, "SHA256SUMS")}
+    if trees:
+        env["SIGN_TREES_OUT"] = trees
+    run("bash", os.path.join(HERE, "sign.sh"), os.path.join(KEYS, keyset), BUILD, iso, env=env)
+
+
+def make_iso(iso_tree, esp_tree, out):
+    sde = run("bash", "-c", f". {HERE}/snapshot.env; s=$SNAPSHOT; "
+              'date -u -d "${s:0:4}-${s:4:2}-${s:6:2} ${s:9:2}:${s:11:2}:${s:13:2}" +%s').strip()
+    run("bash", os.path.join(HERE, "make-iso.sh"), iso_tree, esp_tree, out, env={"SOURCE_DATE_EPOCH": sde})
+
+
+def iso_file_extent(iso, path):
+    """(byte offset, size) of a file inside an ISO image."""
+    rep = run("xorriso", "-indev", iso, "-find", path, "-exec", "report_lba")
+    m = re.search(r"File data lba:\s*\d+\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", rep)
+    return int(m.group(1)) * 2048, int(m.group(3))
+
+
+def flip_byte(path, offset):
+    with open(path, "r+b") as f:
+        f.seek(offset)
+        b = f.read(1)
+        f.seek(offset)
+        f.write(bytes([b[0] ^ 0x55]))
+
+
+def make_vars(name, keyset=None):
+    path = f"{W}/{name}.vars"
+    if keyset is None:
+        shutil.copy(BLANK_VARS, path)
+        return path
+    k = os.path.join(KEYS, keyset)
+    guid = open(os.path.join(k, "owner.guid")).read().strip()
+    run("virt-fw-vars", "--input", BLANK_VARS, "--output", path,
+        "--set-pk", guid, f"{k}/PK.crt", "--add-kek", guid, f"{k}/KEK.crt",
+        "--add-db", guid, f"{k}/db.crt", "--no-microsoft", "--secure-boot")
+    return path
 
 
 def fresh_disks():
-    pattern = b"SECRET-KEY-MATERIAL-" * 52429
+    pattern = (b"SECRET-KEY-MATERIAL-" * 52429)[: 1024 * 1024]
     for d in ("sata", "nvme"):
         with open(f"{W}/{d}.img", "wb") as f:
             for _ in range(64):
-                f.write(pattern[: 1024 * 1024])
+                f.write(pattern)
 
 
+# --- one VM ---------------------------------------------------------------------------------
 class Qemu:
-    def __init__(self, tag, firmware="bios", kernel_args=None):
+    def __init__(self, tag, iso, vars_template):
         self.tag = tag
         self.mon_path = f"{W}/{tag}.mon"
         self.ser_path = f"{W}/{tag}.ser"
+        vars_file = f"{W}/{tag}.vars"
+        shutil.copy(vars_template, vars_file)
+        machine = [f"q35,smm=on,accel={ACCEL}", "-global", "driver=cfi.pflash01,property=secure,value=on"] \
+            if SMM else [f"q35,smm=off,accel={ACCEL}"]
         args = [
-            "qemu-system-x86_64", "-machine", "q35,accel=kvm", "-cpu", "host", "-m", "3072", "-smp", "2",
+            "qemu-system-x86_64", "-machine", *machine,
+            "-cpu", "host" if ACCEL == "kvm" else "max", "-m", "3072", "-smp", "2",
+            "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={CODE}",
+            "-drive", f"if=pflash,format=raw,unit=1,file={vars_file}",
             "-device", "qemu-xhci,id=xhci",
-            "-drive", f"if=none,id=stick,format=raw,file={ISO},readonly=on",
-            # Direct kernel boot claims bootindex 0 for itself.
-            "-device", "usb-storage,bus=xhci.0,drive=stick" + (",bootindex=0" if kernel_args is None else ""),
+            "-drive", f"if=none,id=stick,format=raw,file={iso},readonly=on",
+            "-device", "usb-storage,bus=xhci.0,drive=stick,bootindex=0",
             "-drive", f"if=none,id=sata,format=raw,file={W}/sata.img",
             "-device", "ide-hd,drive=sata,bus=ide.0",
             "-drive", f"if=none,id=nvme,format=raw,file={W}/nvme.img",
@@ -81,12 +163,6 @@ class Qemu:
             "-monitor", f"unix:{self.mon_path},server=on,wait=off",
             "-chardev", f"socket,id=ser0,path={self.ser_path},server=on,wait=off", "-serial", "chardev:ser0",
         ]
-        if firmware == "uefi":
-            shutil.copy("/usr/share/OVMF/OVMF_VARS_4M.fd", f"{W}/{tag}.vars")
-            args += ["-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
-                     "-drive", f"if=pflash,format=raw,file={W}/{tag}.vars"]
-        if kernel_args is not None:
-            args += ["-kernel", f"{W}/vmlinuz", "-initrd", f"{W}/initrd.img", "-append", kernel_args]
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=open(f"{OUT}/{tag}.qemu.log", "w"))
         for _ in range(100):
             if os.path.exists(self.mon_path) and os.path.exists(self.ser_path):
@@ -100,10 +176,11 @@ class Qemu:
         self.ser.settimeout(0.2)
         self.serial_log = open(f"{OUT}/{tag}.serial.log", "wb")
         self.buf = b""
+        self.all = b""
 
     def _mon_read(self):
         data = b""
-        self.mon.settimeout(10)
+        self.mon.settimeout(90)
         while not data.endswith(b"(qemu) "):
             chunk = self.mon.recv(4096)
             if not chunk:
@@ -121,8 +198,8 @@ class Qemu:
         time.sleep(0.5)
         return path
 
-    def lit_pixels(self, box):
-        """Bright pixels inside box=(x0, y0, x1, y1) of the current screen (PPM dump)."""
+    def screen(self):
+        """(width, height, rgb bytes) of the current screen."""
         path = f"{W}/{self.tag}-probe.ppm"
         self.mon_cmd(f"screendump {path}")
         for _ in range(20):
@@ -133,7 +210,10 @@ class Qemu:
         os.remove(path)
         parts = data.split(b"\n", 3)
         w, h = map(int, parts[1].split())
-        px = parts[3]
+        return w, h, parts[3]
+
+    def lit(self, box):
+        w, h, px = self.screen()
         x0, y0, x1, y1 = box
         n = 0
         for y in range(y0, min(y1, h)):
@@ -141,21 +221,49 @@ class Qemu:
             n += sum(1 for i in range(0, len(row), 3) if row[i] > 128)
         return n
 
-    def wait_for_menu(self, timeout=240):
-        """The menu's four option lines (rows 32-100 px, left side only) must be drawn
-        twice in a row. GRUB's menu also has text there but its highlight bar runs
-        across the screen, so the right half must stay dark. Keys sent before
-        airsign owns tty1 are flushed, so typing early loses them."""
+    def boot_menu_bar(self):
+        """True when systemd-boot's highlighted entry (a wide light bar) is on screen."""
+        w, h, px = self.screen()
+        for y in range(0, h, 4):
+            row = px[y * w * 3:(y + 1) * w * 3]
+            best = run_len = 0
+            for i in range(0, len(row), 3):
+                if row[i] > 150 and row[i + 1] > 150 and row[i + 2] > 150:
+                    run_len += 1
+                    best = max(best, run_len)
+                else:
+                    run_len = 0
+            if best > w // 4:
+                return True
+        return False
+
+    def choose(self, entry, timeout=60):
+        """Pick a systemd-boot entry by position once the menu is up."""
+        end = time.time() + timeout * SLOW
+        while time.time() < end:
+            self.pump()
+            if self.boot_menu_bar():
+                time.sleep(0.3)
+                for _ in range(ENTRY[entry]):
+                    self.mon_cmd("sendkey down")
+                    time.sleep(0.15)
+                self.mon_cmd("sendkey ret")
+                return True
+            time.sleep(0.3)
+        return False
+
+    def wait_for_airsign_menu(self, timeout=240):
+        """airsign's option lines on the left, nothing on the right half, twice in a row."""
         end, seen = time.time() + timeout, 0
         while time.time() < end:
-            ready = self.lit_pixels((0, 32, 360, 100)) > 400 and self.lit_pixels((400, 32, 700, 100)) < 50
+            ready = self.lit((0, 48, 360, 120)) > 400 and self.lit((460, 48, 700, 120)) < 50
             seen = seen + 1 if ready else 0
             if seen >= 2:
                 return True
             time.sleep(2)
         return False
 
-    KEYS = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash", ":": "shift-semicolon"}
+    KEYS = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash"}
 
     def type(self, text, delay=0.04):
         for ch in text:
@@ -172,11 +280,12 @@ class Qemu:
                 self.serial_log.write(chunk)
                 self.serial_log.flush()
                 self.buf += chunk
+                self.all += chunk
         except (socket.timeout, BlockingIOError, OSError):
             pass
 
     def expect(self, pattern, timeout=180):
-        end = time.time() + timeout
+        end = time.time() + timeout * SLOW
         rx = re.compile(pattern.encode())
         while time.time() < end:
             self.pump()
@@ -188,15 +297,14 @@ class Qemu:
                 return None
         return None
 
-    def send(self, text):
-        self.ser.sendall(text.encode())
-
     def wait_exit(self, timeout=90):
-        try:
-            self.proc.wait(timeout)
-            return True
-        except subprocess.TimeoutExpired:
-            return False
+        end = time.time() + timeout * SLOW
+        while time.time() < end:
+            self.pump()
+            if self.proc.poll() is not None:
+                return True
+            time.sleep(0.2)
+        return False
 
     def kill(self):
         if self.proc.poll() is None:
@@ -209,47 +317,89 @@ def decode_qr(png):
     return r.stdout.strip()
 
 
-def test_selftest():
-    print("--- A: self-test entry (direct kernel boot, legacy BIOS)", flush=True)
+def clean(text):
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
+# --- tests ----------------------------------------------------------------------------------
+def explore(iso, vars_t):
     fresh_disks()
-    q = Qemu("A-selftest", kernel_args=f"{COMMON} {BLOCK} airsign.selftest=1 console=tty0 console=ttyS0,115200")
+    q = Qemu("X-explore", iso, vars_t)
     try:
-        ok = q.expect(r"AIRSIGN-SELFTEST-BEGIN", 240) is not None
-        record("self-test started", ok)
-        if not ok:
-            return
-        if q.expect(r"QR_READY", 120):
-            time.sleep(1)
-            png = q.screenshot("A-tty1-qr")
-            got = decode_qr(png)
-            record("QR drawn on the text console decodes to the expected signatures", got == SIG, got[:24] + "...")
-        q.expect(r"AIRSIGN-SELFTEST-END", 60)
-        log = open(f"{OUT}/A-selftest.serial.log", "rb").read().decode(errors="replace")
-        for line in log.splitlines():
-            line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
-            if line.startswith(("PASS  ", "FAIL  ")):
-                record("[in image] " + line[6:], line.startswith("PASS"))
-            elif line.split(":")[0] in ("net interfaces", "block devices", "live mounts", "mem auto-init", "usb devices"):
-                print("      " + line, flush=True)
-        record("powered off by itself", q.wait_exit(90))
+        t0 = time.time()
+        for i in range(30):
+            q.screenshot(f"X-{i:02d}")
+            print(f"      t={time.time() - t0:.0f}s menu-bar={q.boot_menu_bar()}", flush=True)
+            time.sleep(2.5)
     finally:
         q.kill()
 
 
-def test_interactive(firmware):
-    tag = f"B-{firmware}-session"
-    print(f"--- B: {firmware.upper()} + GRUB default entry, full signing session on the keyboard", flush=True)
+def debug_entry(iso, vars_t, entry="selftest"):
     fresh_disks()
-    q = Qemu(tag, firmware=firmware)
+    q = Qemu("E-debug", iso, vars_t)
     try:
-        record(f"{firmware}: boots through GRUB to the airsign menu", q.wait_for_menu())
+        print(f"      chose {entry}: {q.choose(entry)}", flush=True)
+        for i in range(18):
+            time.sleep(10)
+            q.pump()
+            q.screenshot(f"E-{i:02d}")
+            print(f"      t={10 * (i + 1)}s serial bytes={len(q.all)}", flush=True)
+            if q.proc.poll() is not None:
+                break
+    finally:
+        q.kill()
+
+
+def test_selftest(iso, vars_t, tag="S-selftest", expect_sb=True):
+    fresh_disks()
+    q = Qemu(tag, iso, vars_t)
+    try:
+        record(f"{tag}: systemd-boot menu shown, self-test entry chosen", q.choose("selftest"))
+        ok = q.expect(r"AIRSIGN-SELFTEST-BEGIN", 240) is not None
+        record(f"{tag}: self-test started", ok)
+        if not ok:
+            return
+        if q.expect(r"QR_READY", 120):
+            time.sleep(1)
+            got = decode_qr(q.screenshot(f"{tag}-tty1-qr"))
+            record(f"{tag}: QR on the text console decodes to the expected signatures", got == SIG, got[:24] + "...")
+        q.expect(r"AIRSIGN-SELFTEST-END", 60)
+        time.sleep(1)
+        q.screenshot(f"{tag}-results-on-screen")
+        text = clean(q.all.decode(errors="replace"))
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith(("PASS  ", "FAIL  ")):
+                name, ok = line[6:], line.startswith("PASS")
+                if name == "booted through UEFI Secure Boot" and not expect_sb:
+                    record(f"{tag}: [in image] Secure Boot reported off, as expected", not ok)
+                else:
+                    record(f"{tag}: [in image] {name}", ok)
+            elif line.startswith(("secure boot:", "net interfaces:", "block devices:", "usb devices:")):
+                print("      " + line, flush=True)
+        verity = re.search(r"verity root: (\w+)", text)
+        record(f"{tag}: running image's verity root equals the published ROOTHASH",
+               bool(verity) and verity.group(1) == ROOTHASH)
+        record(f"{tag}: powered off by itself", q.wait_exit(150))
+    finally:
+        q.kill()
+
+
+def test_session(iso, vars_t):
+    tag = "I-session"
+    fresh_disks()
+    q = Qemu(tag, iso, vars_t)
+    try:
+        q.choose("signer")
+        record(f"{tag}: boots to the airsign menu", q.wait_for_airsign_menu())
         q.screenshot(f"{tag}-1-menu")
         q.type("1\n")
         time.sleep(0.5)
         q.type("12\n")
         q.type(SEED_PREFIXES + "\n")
         time.sleep(1)
-        q.type("\n")  # empty BIP39 passphrase
+        q.type("\n")
         time.sleep(1)
         minimal = run(AIRSIGN, "show", REQ, "--format", "minimal")
         for line in minimal.splitlines():
@@ -260,97 +410,171 @@ def test_interactive(firmware):
         q.screenshot(f"{tag}-2-review")
         q.type("sign\n")
         time.sleep(3)
-        png = q.screenshot(f"{tag}-3-signature-qr")
-        got = decode_qr(png)
-        record(f"{firmware}: signatures QR from a typed session matches Bitcoin Core's", got == SIG, got[:24] + "...")
-        q.type("\n")  # leave the QR view
+        got = decode_qr(q.screenshot(f"{tag}-3-signature-qr"))
+        record(f"{tag}: signatures from a typed session match Bitcoin Core's", got == SIG, got[:24] + "...")
+        q.type("\n")
         time.sleep(1.5)
-        q.screenshot(f"{tag}-4-back-at-menu")
-        q.type("4\n")  # Shut down
-        t0 = time.time()
-        off = q.wait_exit(150)
-        print(f"      power-off took {time.time() - t0:.0f} s", flush=True)
-        if not off:
-            q.screenshot(f"{tag}-5-after-shutdown")
-        record(f"{firmware}: 'Shut down' powers the machine off", off)
-    finally:
-        q.kill()
-
-
-def test_bios_menu():
-    tag = "C-bios-menu"
-    print("--- C: legacy BIOS + GRUB default entry", flush=True)
-    fresh_disks()
-    q = Qemu(tag, firmware="bios")
-    try:
-        record("bios: boots through GRUB to the airsign menu", q.wait_for_menu())
-        q.screenshot(f"{tag}-menu")
         q.type("4\n")
-        record("bios: boots to the menu and powers off from it", q.wait_exit(60))
+        record(f"{tag}: 'Shut down' powers the machine off", q.wait_exit(60))
     finally:
         q.kill()
 
 
-def test_wipe():
-    print("--- D: wipe entry against throwaway SATA and NVMe disks", flush=True)
+def test_wipe(iso, vars_t):
+    tag = "W-wipe"
     fresh_disks()
-    q = Qemu("D-wipe", kernel_args=f"{COMMON} airsign.wipe=1 console=tty0 console=ttyS0,115200")
+    q = Qemu(tag, iso, vars_t)
     try:
+        q.choose("wipe")
         for _ in range(2):
             m = q.expect(r"Type the drive name \((\w+)\) to erase it", 240)
             if not m:
                 break
-            q.send(m.group(1).decode() + "\n")
+            time.sleep(0.5)
+            q.type(m.group(1).decode() + "\n")
         q.expect(r"Press Enter to power off", 600)
-        q.send("\n")
-        record("wipe: powered off after erasing", q.wait_exit(90))
+        time.sleep(0.5)
+        q.type("\n")
+        record(f"{tag}: powered off after erasing", q.wait_exit(90))
     finally:
         q.kill()
     for d in ("sata", "nvme"):
         data = open(f"{W}/{d}.img", "rb").read()
-        record(f"wipe: {d} disk image reads back as all zeros", data.count(0) == len(data),
+        record(f"{tag}: {d} disk image reads back as all zeros", data.count(0) == len(data),
                f"{len(data) - data.count(0)} nonzero bytes")
-    log = open(f"{OUT}/D-wipe.serial.log", "rb").read().decode(errors="replace")
-    for line in log.splitlines():
-        if line.strip().startswith(("Drive ", "NVMe", "secure discard", "discard", "read-back", "VERIFIED", "WARNING", "---")):
+    for line in clean(q.all.decode(errors="replace")).splitlines():
+        if line.strip().startswith(("Drive ", "NVMe", "secure discard", "discard", "read-back", "VERIFIED", "WARNING")):
             print("      " + line.strip(), flush=True)
 
 
-def debug_shutdown():
-    """Default entry with systemd talking on the serial port, then 'Shut down'."""
-    print("--- E: debug shutdown with serial console", flush=True)
+def test_enroll(iso):
+    """Setup Mode firmware + signed stick: enroll the owner's keys from the boot
+    menu, then the next boot must be Secure Boot enforcing those keys."""
+    tag = "K-enroll"
     fresh_disks()
-    q = Qemu("E-debug", kernel_args=f"{COMMON} {BLOCK} console=tty0 console=ttyS0,115200 "
-             "systemd.show_status=true systemd.log_level=info loglevel=6")
+    q = Qemu(tag, iso, BLANK_VARS)
     try:
-        q.expect(r"Reached target.*Multi-User", 120)
-        time.sleep(3)
-        q.screenshot("E-before")
-        q.type("4\n")
-        time.sleep(3)
-        q.screenshot("E-after")
-        end = time.time() + 60
-        while time.time() < end and q.proc.poll() is None:
+        end = time.time() + 120 * SLOW
+        while time.time() < end and not q.boot_menu_bar():
             q.pump()
-        record("debug: powered off", q.proc.poll() is not None)
+            time.sleep(1)
+        q.mon_cmd("sendkey down")  # stop the countdown
+        time.sleep(3 * SLOW)
+        # In Setup Mode systemd-boot lists "Enroll Secure Boot keys: airsign"
+        # last (this firmware does not mirror the menu text to serial, so the
+        # screenshot is the record of it).
+        q.screenshot(f"{tag}-1-setup-mode-menu")
+        q.mon_cmd("sendkey end")
+        time.sleep(1)
+        q.screenshot(f"{tag}-2-enroll-selected")
+        q.mon_cmd("sendkey ret")
+        # Do not touch the keyboard during systemd-boot's enrollment countdown;
+        # it then writes PK/KEK/db and resets the machine. Watch the menu go
+        # away (countdown, reset, firmware) and pick the self-test as soon as it
+        # comes back, before its 5 s timeout boots the default entry.
+        end = time.time() + 120 * SLOW
+        while time.time() < end and q.boot_menu_bar():
+            time.sleep(0.5)
+        q.screenshot(f"{tag}-3-enrolling")
+        record(f"{tag}: after enrolling and resetting, the menu comes back", q.choose("selftest", timeout=180))
+        ok = q.expect(r"AIRSIGN-SELFTEST-BEGIN", 300) is not None
+        sb = q.expect(r"secure boot: (\w+)", 60)
+        record(f"{tag}: keys enrolled from the stick; next boot runs with Secure Boot on",
+               ok and sb is not None and sb.group(1) == b"on", sb.group(1).decode() if sb else "no self-test")
     finally:
         q.kill()
-    log = open(f"{OUT}/E-debug.serial.log", "rb").read().decode(errors="replace")
-    print("\n".join(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", l) for l in log.splitlines()[-40:]))
+
+
+def test_refused_by_initramfs(tag, iso, vars_t, why):
+    fresh_disks()
+    q = Qemu(tag, iso, vars_t)
+    try:
+        q.choose("selftest")
+        m = q.expect(r"SYSTEM IMAGE FAILED VERIFICATION: ([^\r\n]*)", 240)
+        record(f"{tag}: refused before the system started ({why})", m is not None,
+               m.group(1).decode(errors="replace") if m else "no refusal seen")
+        q.screenshot(f"{tag}-screen")
+        record(f"{tag}: nothing from the image ran", b"AIRSIGN-SELFTEST-BEGIN" not in q.all)
+        record(f"{tag}: powered off", q.wait_exit(120))
+    finally:
+        q.kill()
+
+
+def test_refused_by_firmware(tag, iso, vars_t, why):
+    fresh_disks()
+    q = Qemu(tag, iso, vars_t)
+    try:
+        q.choose("selftest", timeout=30)
+        end = time.time() + 40 * SLOW
+        while time.time() < end:
+            q.pump()
+            time.sleep(0.5)
+        q.screenshot(f"{tag}-screen")
+        record(f"{tag}: firmware did not start Linux ({why})",
+               b"Linux version" not in q.all and b"AIRSIGN" not in q.all)
+    finally:
+        q.kill()
 
 
 try:
-    which = sys.argv[3] if len(sys.argv) > 3 else "ABCD"
-    if "E" in which:
-        debug_shutdown()
-    if "A" in which:
-        test_selftest()
-    if "B" in which:
-        test_interactive("uefi")
-    if "C" in which:
-        test_bios_menu()
-    if "D" in which:
-        test_wipe()
+    owner_vars = make_vars("owner-sb", "owner")
+    blank_vars = make_vars("blank")
+    signed = f"{W}/signed.iso"
+    trees = f"{W}/trees"
+    sign("owner", signed, trees)
+    print(f"signed ISO built with the owner's db key; verity root {ROOTHASH[:16]}...", flush=True)
+
+    if "X" in WHICH:
+        explore(signed, owner_vars)
+    if "Y" in WHICH:
+        explore(signed, blank_vars)
+    if "E" in WHICH:
+        debug_entry(signed, owner_vars)
+    if "S" in WHICH:
+        print("--- S: self-test entry, Secure Boot on (owner keys only)", flush=True)
+        test_selftest(signed, owner_vars)
+    if "I" in WHICH:
+        print("--- I: default entry, typed signing session", flush=True)
+        test_session(signed, owner_vars)
+    if "W" in WHICH:
+        print("--- W: wipe entry", flush=True)
+        test_wipe(signed, owner_vars)
+    if "T" in WHICH:
+        print("--- T: tampered sticks", flush=True)
+        t1 = f"{W}/t1.iso"
+        shutil.copy(signed, t1)
+        off, size = iso_file_extent(t1, "/live/filesystem.squashfs")
+        flip_byte(t1, off + size // 2)
+        test_refused_by_initramfs("T1-image-byte", t1, owner_vars, "one byte of the system image changed")
+
+        t2tree = f"{W}/t2-iso"
+        shutil.copytree(f"{trees}/iso", t2tree)
+        os.remove(f"{t2tree}/live/filesystem.squashfs.verity")
+        t2 = f"{W}/t2.iso"
+        make_iso(t2tree, f"{trees}/esp", t2)
+        test_refused_by_initramfs("T2-no-hash-tree", t2, owner_vars, "the dm-verity hash tree was deleted")
+    if "F" in WHICH:
+        print("--- F: tampered or foreign boot code, refused by the firmware", flush=True)
+        t3esp = f"{W}/t3-esp"
+        shutil.copytree(f"{trees}/esp", t3esp)
+        uki = f"{t3esp}/EFI/Linux/airsign.efi"
+        flip_byte(uki, os.path.getsize(uki) // 2)
+        t3 = f"{W}/t3.iso"
+        make_iso(f"{trees}/iso", t3esp, t3)
+        test_refused_by_firmware("T3-uki-modified", t3, owner_vars, "UKI changed after signing")
+
+        t4 = f"{W}/t4.iso"
+        sign("attacker", t4)
+        test_refused_by_firmware("T4-wrong-key", t4, owner_vars, "UKI signed with someone else's key")
+
+        test_refused_by_firmware("T5-unsigned", os.path.join(BUILD, "airsign-live.iso"), owner_vars,
+                                 "unsigned ISO")
+    if "K" in WHICH:
+        print("--- K: key enrollment from the stick in Setup Mode", flush=True)
+        test_enroll(signed)
+    if "U" in WHICH:
+        print("--- U: unsigned ISO, Secure Boot off", flush=True)
+        test_selftest(os.path.join(BUILD, "airsign-live.iso"), blank_vars, tag="U-unsigned-sb-off", expect_sb=False)
 finally:
     shutil.rmtree(W, ignore_errors=True)
 

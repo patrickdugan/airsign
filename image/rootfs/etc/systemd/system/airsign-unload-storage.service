@@ -1,0 +1,13 @@
+[Unit]
+Description=airsign: unload USB storage drivers once USBGuard has refused the boot stick
+After=usbguard.service airsign-lockdown.service
+Before=airsign.service airsign-selftest.service
+ConditionKernelCommandLine=!airsign.wipe=1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/airsign/unload-storage.sh
+
+[Install]
+WantedBy=multi-user.target

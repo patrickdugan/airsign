@@ -1,0 +1,19 @@
+#!/bin/sh
+# Put what the fail-closed verity check needs into the initramfs. live-boot's
+# own hook already adds dm-verity and util-linux mount; libmount loads
+# libcryptsetup with dlopen() for "mount -o verity.*", which copy_exec cannot
+# discover from the mount binary, so it is copied explicitly.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+manual_add_modules dm_verity
+copy_exec /usr/sbin/dmsetup /sbin
+for lib in /usr/lib/x86_64-linux-gnu/libcryptsetup.so.12*; do
+  [ -e "$lib" ] && copy_exec "$lib"
+done
+exit 0

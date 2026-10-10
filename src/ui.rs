@@ -353,6 +353,29 @@ fn export_flow(s: &Session) -> Result<(), CodecError> {
     Ok(())
 }
 
+/// What this boot can vouch for, shown on the live image's main menu. Under
+/// Secure Boot the command line is the one sealed in the signed UKI, and the
+/// initramfs has already refused to continue unless the mounted system image
+/// verified against this root hash.
+fn boot_status() -> String {
+    let sb = std::fs::read("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c")
+        .ok()
+        .and_then(|v| v.get(4).copied());
+    let root = std::fs::read_to_string("/proc/cmdline").ok().and_then(|c| {
+        c.split_whitespace()
+            .find_map(|p| p.strip_prefix("dm-verity-root-hash=filesystem.squashfs:").map(String::from))
+    });
+    let sb_text = match sb {
+        Some(1) => "Secure Boot ON",
+        Some(_) => "Secure Boot OFF: this boot was NOT verified",
+        None => "Secure Boot state unknown",
+    };
+    match root {
+        Some(r) => format!("{sb_text}  |  system image root {}", &r[..r.len().min(16)]),
+        None => format!("{sb_text}  |  system image NOT verified"),
+    }
+}
+
 pub fn menu(s: &Session) -> i32 {
     for note in harden::harden() {
         if s.live {
@@ -361,7 +384,11 @@ pub fn menu(s: &Session) -> i32 {
     }
     loop {
         clear();
-        println!("airsign {}  offline signer\n", env!("CARGO_PKG_VERSION"));
+        println!("airsign {}  offline signer", env!("CARGO_PKG_VERSION"));
+        if s.live {
+            println!("{}", boot_status());
+        }
+        println!();
         println!("  1  Sign a transaction");
         println!("  2  Create a new seed");
         println!("  3  Show the watch-only account for a seed");

@@ -1,0 +1,60 @@
+#!/bin/sh
+# Fail-closed check, run by live-boot after it has mounted the system image
+# and before anything from that image executes.
+#
+# live-boot's dm-verity support fails open: if the .verity file is missing,
+# if mount lacks verity support, or if no root hash is given, it logs a warning
+# and mounts the image unverified. So we insist on all of this:
+#   * the root hash is on the kernel command line, which under Secure Boot is
+#     the one sealed inside the signed UKI;
+#   * the mounted image is a dm-verity device;
+#   * that device's root hash is exactly the one from the command line;
+#   * every block of the image verifies (read it all once now, so tampering
+#     anywhere is caught at boot rather than whenever that file is first used).
+# Anything else: say so on the console and power off. No shell is offered.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in
+  prereqs) prereqs; exit 0 ;;
+esac
+
+fail() {
+  msg="
+AIRSIGN: SYSTEM IMAGE FAILED VERIFICATION: $*
+AIRSIGN: this stick has been modified or damaged. Do not use it.
+AIRSIGN: powering off in 30 seconds."
+  # The console may be a serial port (self-test entry); always show it on screen too.
+  echo "$msg"
+  [ -c /dev/tty1 ] && echo "$msg" > /dev/tty1
+  sleep 30
+  echo o > /proc/sysrq-trigger
+  sleep 60
+}
+
+expected=""
+for p in $(cat /proc/cmdline); do
+  case "$p" in
+    dm-verity-root-hash=filesystem.squashfs:*) expected="${p#dm-verity-root-hash=filesystem.squashfs:}" ;;
+  esac
+done
+[ -n "$expected" ] || fail "no root hash on the kernel command line"
+
+src=$(awk '$3 == "squashfs" && $2 ~ /\/filesystem\.squashfs$/ { print $1; exit }' /proc/mounts)
+[ -n "$src" ] || fail "the system image is not mounted"
+
+case "$src" in
+  /dev/mapper/*) name="${src#/dev/mapper/}" ;;
+  /dev/dm-*) name=$(cat "/sys/block/${src#/dev/}/dm/name" 2>/dev/null) ;;
+  *) fail "the system image is mounted from $src, not through dm-verity" ;;
+esac
+[ -n "$name" ] || fail "cannot identify the device-mapper device for $src"
+
+# verity table: start len verity version data hash dblk hblk nblocks hstart alg ROOT salt ...
+set -- $(dmsetup table "$name" 2>/dev/null)
+[ "$3" = "verity" ] || fail "$src is not a dm-verity device"
+[ "${12}" = "$expected" ] || fail "root hash ${12} does not match the signed command line"
+
+dd if="$src" of=/dev/null bs=1048576 2>/dev/null || fail "image blocks do not match the hash tree"
+
+echo "airsign: system image verified (root hash ${expected})"
+exit 0

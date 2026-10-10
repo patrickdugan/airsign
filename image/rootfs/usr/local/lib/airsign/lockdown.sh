@@ -27,6 +27,11 @@ cat > /run/modprobe.d/airsign-no-usb-storage.conf <<'EOF'
 install usb_storage /bin/false
 install uas /bin/false
 EOF
-modprobe -r uas usb_storage 2>/dev/null || true
+# udevd caches the modprobe configuration; make it pick up the block above, or
+# it would reload the drivers for the next storage device it sees.
+udevadm control --reload 2>/dev/null || true
+# The drivers themselves are unloaded by unload-storage.sh, after USBGuard has
+# refused the boot stick: until then the stick is authorized and udev would
+# simply probe it again.
 say "airsign: running from RAM; you can remove the USB stick."
 exit 0

@@ -33,6 +33,8 @@ and never on a USB stick.
 
 | Property | Mechanism | Checked by |
 |---|---|---|
+| Only your boot code runs | UEFI Secure Boot with *your own* keys (`image/keys.sh`). The firmware starts only systemd-boot and one UKI signed with your db key (`image/sign.sh`). The UKI seals kernel, initramfs and every command line, root hash included. UEFI only: no GRUB, no legacy BIOS path. | QEMU, OVMF with Secure Boot (SMM build): a UKI changed after signing, a UKI signed with another key, and the unsigned ISO are all refused by the firmware |
+| The system image is the published one | dm-verity: the squashfs is mounted through a hash tree whose root hash is in the signed command line. A check inside the signed initramfs refuses to continue unless the root is that exact verity device and every block verifies; it fails closed where live-boot alone would mount an unverified image. | QEMU: one changed byte and a deleted hash tree are both refused before anything from the image runs; self-test: root hash = published `ROOTHASH` |
 | Nothing persists | `toram`: the stick is copied into RAM. The root is squashfs plus a tmpfs overlay, and no disk is ever mounted. | self-test: medium not mounted from the stick |
 | RAM is wiped at shutdown | `init_on_free=1 init_on_alloc=1` (the same mechanism Tails uses today). "Shut down" powers off through systemd, so every page is freed and zeroed. | self-test: `mem auto-init: … heap free:on` |
 | No network, ever | `drivers/net`, wireless, Bluetooth, NFC, CAN, InfiniBand, Thunderbolt and FireWire module trees are **deleted** from the image. There is no firmware and no network manager. The signer runs with `PrivateNetwork=yes` and AF_UNIX only. | self-test with e1000e + virtio NICs attached: only `lo` exists |
@@ -176,15 +178,23 @@ against Core instead of trusted.
   `testmempoolaccept` accepts the result, mines it, and finds the change.
   Core's own signature is byte-identical. A one-word typo is caught at its line,
   and a wrong seed is refused.
-* `image/test_qemu.py`, QEMU/KVM, booting from a virtual USB stick with a SATA
-  disk, an NVMe disk, an e1000e and a virtio NIC attached: 27/27.
-  * The in-image self-test confirms every row of the live-system table above.
-  * The QR on the real text console (VGA text mode) is photographed and
-    decoded.
-  * A full UEFI + GRUB signing session is typed on the virtual keyboard: seed as
-    4-letter prefixes, request as two-letter words. The signatures match Core,
-    and Shut down powers off.
-  * Legacy BIOS boot works.
+* `image/test_qemu.py` boots from a virtual USB stick with a SATA disk, an NVMe
+  disk, an e1000e and a virtio NIC attached. It runs under KVM, and under TCG
+  for the Secure Boot-enforcing OVMF build (KVM cannot provide SMM under nested
+  virtualization).
+  * The in-image self-test confirms every row of the live-system table above,
+    including Secure Boot on and a root hash equal to the published `ROOTHASH`.
+  * The QR on the real text console is photographed and decoded.
+  * A full signing session is typed on the virtual keyboard: seed as 4-letter
+    prefixes, request as two-letter words. The signatures match Core, and Shut
+    down powers off.
+  * Tampering is refused:
+    * one changed byte in the system image, and a deleted hash tree, are caught
+      by the initramfs check;
+    * a UKI changed after signing, a UKI signed with another key, and the
+      unsigned ISO are caught by the firmware.
+  * In Setup Mode the stick's "Enroll Secure Boot keys" entry enrolls the
+    owner's keys, and the following boot runs with Secure Boot on.
   * The wipe entry leaves both disks all zeros. The SATA disk's discard
     "succeeded" but left data behind; the read-back caught it and the zero pass
     finished the job.
@@ -215,7 +225,7 @@ and Tails does for its ISO), and (b) the check covers the bytes that actually
 boot. Hashing the stick from another computer does not give you (b). That
 computer may be compromised. Worse, a malicious USB controller can return the
 clean image to a sequential read and different blocks to the BIOS at boot.
-The build now gives you (a) (step 1 below). (b) needs verified boot.
+The build now gives you (a), and verified boot gives you (b) (steps 1–3 below).
 
 **A succinct proof of the build: a real upgrade in trust, not buildable
 yet.** Nothing here is secret, so zero-knowledge as such adds nothing. What a
@@ -253,33 +263,63 @@ modify its own verifier too.
    chroot made from one pinned `snapshot.debian.org` snapshot, with every
    timestamp set to the snapshot time. The expected hashes are in
    `image/SHA256SUMS`. Two builds, each from a newly created builder and run at
-   different times, matched byte for byte for all five outputs. Four sources of
-   variation had to go:
+   different times, matched byte for byte for every output. Sources of
+   variation that had to go:
    * random NVMe-oF host IDs written by nvme-cli's postinst;
-   * GRUB's wall-clock `/.disk/<time>.uuid` file. It is now made with the
-     clock stopped (`faketime -f`); the wrapper's default offset mode still
-     drifted by a second between builds;
-   * timestamps on the temporary files grub-mkrescue writes;
+   * wall-clock time in the EFI partition's FAT entries and in the ISO's volume
+     and file dates. `make-iso.sh` runs `mkfs.fat --invariant`, mtools and
+     xorriso with the clock stopped (`faketime -f`; the wrapper's default
+     offset mode drifted by a second between builds) and stamps every file with
+     the snapshot time;
+   * veritysetup's random salt and UUID (now fixed);
    * mksquashfs refusing explicit times when `SOURCE_DATE_EPOCH` is set.
 
    Still to do: rebuilders on other machines, and signed hashes.
-2. **dm-verity on the squashfs**, with the root hash on the kernel command
-   line. Every block is checked against the hash tree as it is read, including
-   during the `toram` copy, so a lying controller cannot substitute blocks.
-3. **A signed Unified Kernel Image (kernel + initramfs + that command line)**,
-   with *your own* Secure Boot keys enrolled in the dedicated laptop. The
-   firmware then refuses any modified kernel, initramfs or command line, and
-   (2) covers the rest. The trust anchor becomes the laptop's firmware keys,
-   which you set once, not the stick.
-4. **Optional anti-evil-maid.** A secret sealed in the laptop's TPM to those
-   boot measurements (tpm2-totp or a phrase you chose) is shown at startup. A
-   changed boot chain cannot unseal it, so you see the difference before typing
-   a seed.
+2. **dm-verity on the squashfs: done.** `veritysetup` (fixed salt, so the
+   root hash is reproducible) writes `filesystem.squashfs.verity`. The root hash
+   goes on the kernel command line, and live-boot mounts the image through
+   dm-verity. live-boot's own handling fails open, though: a missing hash tree,
+   a `mount` without verity support, or a missing root hash each just log a
+   warning and mount the image unverified. So the signed initramfs carries a
+   check (`scripts/live-bottom/airsign-verity`) that powers off unless:
+   * the mounted root is a dm-verity device;
+   * its root hash equals the one on the command line;
+   * all of its blocks read back verified.
+
+   The check runs on the copy in RAM, which is also the copy that gets used, so
+   a USB controller that serves different data on a second read gains nothing.
+3. **One signed UKI, your keys: done.** ukify builds a multi-profile UKI: one
+   kernel and initramfs, three sealed command lines (signer, self-test, wipe)
+   that systemd-boot shows as menu entries. Under Secure Boot, systemd-stub
+   ignores any command line the loader passes.
+
+   The build itself is unsigned and reproducible. `image/sign.sh` then signs
+   systemd-boot and the UKI with *your* db key, but only after checking every
+   input against `image/SHA256SUMS`. Afterwards it checks that each signature
+   covers the same Authenticode digest as the published unsigned binary. The
+   signed stick also carries your `PK`/`KEK`/`db` `.auth` files, so
+   systemd-boot can enroll them while the firmware is in Setup Mode.
+
+   The trust anchor is the laptop's firmware keys, which you set once, not the
+   stick. The airsign menu shows "Secure Boot ON" and the running image's root
+   hash on every boot.
+
+   **Trade-off:** enrolling *only* your keys removes Microsoft's. Shim-signed
+   distributions and Windows will no longer boot on that laptop (intended), and
+   neither will GPU option ROMs that are signed by Microsoft. Use a dedicated
+   laptop with integrated graphics. If you keep Microsoft's third-party CA,
+   anything it signed (shim, then a distribution kernel with an unverified
+   initramfs) will boot too, which defeats the point.
+4. **Optional anti-evil-maid: not done.** A secret sealed in the laptop's TPM
+   to these boot measurements (tpm2-totp or a phrase you chose) would be shown
+   at startup. A changed boot chain could not unseal it, so you would see the
+   difference before typing a seed.
 
 ## Not done / next
 
-* Secure Boot: the GRUB EFI image is unsigned, so disable Secure Boot or boot in
-  legacy mode. The plan is the signed UKI + dm-verity in "Trusting the stick".
+* Secure Boot on real hardware. Enrollment and enforcement are tested in OVMF
+  only (QEMU, SMM build), not yet on a physical laptop's firmware.
+* TPM anti-evil-maid (step 4 above).
 * Independent rebuilders. So far the image has been reproduced only on one
   machine (WSL2 with an Ubuntu 24.04 host). It needs builders on other machines
   and other host distributions, each signing `image/SHA256SUMS`.

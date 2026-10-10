@@ -1,9 +1,12 @@
 #!/bin/bash
-# Self-test boot entry: checks the properties the design depends on, prints
-# PASS/FAIL lines on the serial port, draws a QR code on tty1 for the host to
-# photograph (QEMU screendump), then powers off.
-exec > /dev/ttyS0 2>&1
+# Self-test boot entry: checks the properties the design depends on and prints
+# PASS/FAIL on the serial port and on screen (so it is useful on a real laptop
+# too), draws a QR code on tty1 for the test host to photograph (QEMU
+# screendump), shows the results again, then powers off.
 set -u
+SERIAL=/dev/ttyS0
+[ -w "$SERIAL" ] && stty -F "$SERIAL" 115200 >/dev/null 2>&1 || SERIAL=/dev/null
+say() { printf '%s\n' "$*" | tee -a /run/selftest.txt >> "$SERIAL"; }
 
 # Public BIP39 test mnemonic and a regtest request it signs; the expected
 # signatures were produced by the host build and match Bitcoin Core's.
@@ -13,18 +16,33 @@ SIG=AS1Z0PM3RZFMFPQSK59MP4YFFUUVQYEFL0FVQKYN6L4ZDSF5HM9YA68689SFELJ8NHMZPCGJYYSW
 
 fails=0
 check() {
-  if eval "$2" >/dev/null 2>&1; then echo "PASS  $1"; else echo "FAIL  $1"; fails=$((fails + 1)); fi
+  if eval "$2" >/dev/null 2>&1; then say "PASS  $1"; else say "FAIL  $1"; fails=$((fails + 1)); fi
 }
 
-sleep 3 # let USBGuard finish applying policy to devices present at boot
-echo "AIRSIGN-SELFTEST-BEGIN $(uname -r)"
-echo "cmdline: $(cat /proc/cmdline)"
-echo "net interfaces: $(ls /sys/class/net | tr '\n' ' ')"
-echo "block devices: $(ls /sys/block | tr '\n' ' ')"
-echo "live mounts: $(grep -E ' /run/live| / ' /proc/mounts | awk '{print $1":"$2":"$3}' | tr '\n' ' ')"
-echo "mem auto-init: $(dmesg | grep -o 'mem auto-init:.*' | head -1)"
-echo "usb devices: $(for d in /sys/bus/usb/devices/*/authorized; do printf '%s=%s ' "$(basename "$(dirname "$d")")" "$(cat "$d")"; done)"
+# Secure Boot state: last byte of the SecureBoot EFI variable.
+secure_boot() {
+  local v=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+  [ -r "$v" ] && [ "$(od -An -tu1 -j4 -N1 "$v" | tr -d ' ')" = 1 ]
+}
+expected_root=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^dm-verity-root-hash=filesystem.squashfs://p')
+root_src=$(awk '$3 == "squashfs" && $2 ~ /\/filesystem\.squashfs$/ { print $1; exit }' /proc/mounts)
+root_dm=$(basename "$root_src")
+[ -e "/sys/block/$root_dm/dm/name" ] && root_dm=$(cat "/sys/block/$root_dm/dm/name")
+verity_root=$(dmsetup table "$root_dm" 2>/dev/null | awk '$3 == "verity" { print $12 }')
 
+: > /run/selftest.txt
+sleep 3 # let USBGuard finish applying policy to devices present at boot
+say "AIRSIGN-SELFTEST-BEGIN $(uname -r)"
+say "secure boot: $(secure_boot && echo on || echo off)   verity root: ${verity_root:-none}"
+say "net interfaces: $(ls /sys/class/net | tr '\n' ' ')"
+say "block devices: $(ls /sys/block | tr '\n' ' ')"
+say "live mounts: $(grep -E ' /run/live| / ' /proc/mounts | awk '{print $1":"$2":"$3}' | tr '\n' ' ')"
+say "mem auto-init: $(dmesg | grep -o 'mem auto-init:.*' | head -1)"
+say "usb devices: $(for d in /sys/bus/usb/devices/*/authorized; do printf '%s=%s ' "$(basename "$(dirname "$d")")" "$(cat "$d")"; done)"
+
+check "booted through UEFI Secure Boot" "secure_boot"
+check "system image mounted through dm-verity" "[ -n \"$verity_root\" ]"
+check "verity root hash equals the one sealed in the UKI command line" "[ -n \"$expected_root\" ] && [ \"$verity_root\" = \"$expected_root\" ]"
 check "kernel zeroes freed memory (init_on_free)" "dmesg | grep -q 'mem auto-init:.*heap free:on'"
 check "booted with toram" "grep -qw toram /proc/cmdline"
 check "boot medium not mounted from the stick" "! findmnt -n -o SOURCE /run/live/medium | grep -q '^/dev/sd'"
@@ -46,18 +64,22 @@ rm -f /run/selftest-seed
 check "airsign signs the fixture exactly as Bitcoin Core does" "[ \"$OUT\" = \"$SIG\" ]"
 
 if [ "$fails" -gt 0 ]; then
-  echo "--- diagnostics"
-  systemctl --no-pager --failed
-  journalctl -b --no-pager -u usbguard -u airsign-lockdown | tail -n 25
-  echo "modules: $(grep -E '^(usb_storage|uas|sd_mod) ' /proc/modules | cut -d' ' -f1-4 | tr '\n' ';')"
-  ls -la /run/modprobe.d; modprobe -n -v usb_storage; echo "modprobe -n exit $?"
-  find /lib/modules \( -path '*net/wireless*' -o -path '*bluetooth*' \) -name '*.ko*' | head
-  echo "--- end diagnostics"
+  {
+    echo "--- diagnostics"
+    systemctl --no-pager --failed
+    journalctl -b --no-pager -u usbguard -u airsign-lockdown | tail -n 25
+    echo "root source: $root_src ($root_dm)"; dmsetup table 2>&1
+    echo "--- end diagnostics"
+  } >> "$SERIAL" 2>&1
 fi
 
 printf '\033[2J\033[H' > /dev/tty1
 /usr/local/bin/airsign show "$SIG" --format qr > /dev/tty1
-echo "QR_READY"
-sleep 20
-echo "AIRSIGN-SELFTEST-END fails=$fails"
+say "QR_READY"
+sleep 15
+printf '\033[2J\033[H' > /dev/tty1
+cat /run/selftest.txt > /dev/tty1
+say "AIRSIGN-SELFTEST-END fails=$fails"
+echo "Powering off in 60 seconds." > /dev/tty1
+sleep 60
 systemctl poweroff
