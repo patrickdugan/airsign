@@ -119,9 +119,12 @@ cp "$HERE/grub.cfg" "$ISO/boot/grub/grub.cfg"
 find "$ISO" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 # grub-mkrescue names /.disk/<time>.uuid and stamps the boot images it embeds
 # from the wall clock, ignoring SOURCE_DATE_EPOCH: run it with the clock frozen.
+# `-f` with an absolute date (no "@") makes libfaketime return exactly that
+# instant on every call; the plain `faketime DATE` form computes an offset from
+# the real clock instead, which drifts across a second boundary between runs.
 # The temporary files it writes still get real mtimes from the kernel, so have
 # xorriso (native commands after "--") record one date for every file.
-TZ=UTC faketime "$(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d %H:%M:%S')" \
+TZ=UTC faketime -f "$(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d %H:%M:%S')" \
   grub-mkrescue -o "$OUT/airsign-live.iso" "$ISO" -- \
   -volid AIRSIGN -volume_date all_file_dates "=$SOURCE_DATE_EPOCH" >/dev/null 2>&1
 

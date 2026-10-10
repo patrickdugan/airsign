@@ -256,7 +256,9 @@ modify its own verifier too.
    different times, matched byte for byte for all five outputs. Four sources of
    variation had to go:
    * random NVMe-oF host IDs written by nvme-cli's postinst;
-   * GRUB's wall-clock `/.disk/<time>.uuid` file;
+   * GRUB's wall-clock `/.disk/<time>.uuid` file. It is now made with the
+     clock stopped (`faketime -f`); the wrapper's default offset mode still
+     drifted by a second between builds;
    * timestamps on the temporary files grub-mkrescue writes;
    * mksquashfs refusing explicit times when `SOURCE_DATE_EPOCH` is set.
 
