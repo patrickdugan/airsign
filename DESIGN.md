@@ -215,23 +215,52 @@ and Tails does for its ISO), and (b) the check covers the bytes that actually
 boot. Hashing the stick from another computer does not give you (b). That
 computer may be compromised. Worse, a malicious USB controller can return the
 clean image to a sequential read and different blocks to the BIOS at boot.
-Today's build does not give you (a) either.
+The build now gives you (a) (step 1 below). (b) needs verified boot.
 
-**ZK proof: the wrong tool.** Nothing here is secret: the source, the
-packages and the build recipe are all public. A ZK proof's only remaining
-benefit would be succinctness: verifying "this ISO came from that commit"
-without rebuilding. Proving a whole Debian + kernel image build inside a zkVM
-is orders of magnitude beyond what zkVMs can do today. Even then, the proof
-would be about the ISO file, not about what your laptop reads from the stick.
-Reproducible builds give the same assurance by plain recomputation.
+**A succinct proof of the build: a real upgrade in trust, not buildable
+yet.** Nothing here is secret, so zero-knowledge as such adds nothing. What a
+STARK or zkVM proof would add is succinctness, and that matters.
+Reproducible builds checked by N independent builders still leave you
+trusting that at least one of them honestly rebuilt and compared. A proof that
+"`build.sh` on commit C and snapshot S outputs these hashes" takes the builders
+out of the trust base entirely, and checks in milliseconds on any device.
+
+Three things stand between that and today:
+
+1. **Scale.** The build runs rustc over about 40 crates, dpkg over about 200
+   packages and xz over about 600 MB. That is roughly 10¹²–10¹³ instructions,
+   and it needs a full Linux userland (files, processes). zkVMs run
+   bare-metal programs, so the build would run under an emulated Linux inside
+   the zkVM. That multiplies the work again, and puts one proof at weeks of GPU
+   cluster time per release. (Rough estimates.)
+2. **It depends on the reproducible build.** The proven computation has to be
+   a deterministic function of public inputs, which is exactly what
+   `image/build.sh` now is.
+3. **It does not reach the laptop.** The proof is about hashes, so verified
+   boot is still what makes the laptop refuse anything else.
+
+A sliced version is within reach sooner. Prove only the *assembly*: "this
+dm-verity root hash is the hash tree of a filesystem whose files are exactly
+the files of these Debian-signed packages plus this repository's files." That
+statement is hashing and decompression, with no compilers. The compiled
+binaries (airsign, the kernel) would stay covered by builder signatures.
 
 **What closes the gap: verify at boot, from a root of trust outside the
 stick.** A stick cannot vouch for itself, because a modified image would
 modify its own verifier too.
 
-1. **Reproducible build.** Pin `snapshot.debian.org` and the toolchains, fix
-   timestamps and file ordering, and have two or more people build and sign the
-   ISO and squashfs hashes.
+1. **Reproducible build: done.** `image/build.sh` builds everything inside a
+   chroot made from one pinned `snapshot.debian.org` snapshot, with every
+   timestamp set to the snapshot time. The expected hashes are in
+   `image/SHA256SUMS`. Two builds, each from a newly created builder and run at
+   different times, matched byte for byte for all five outputs. Four sources of
+   variation had to go:
+   * random NVMe-oF host IDs written by nvme-cli's postinst;
+   * GRUB's wall-clock `/.disk/<time>.uuid` file;
+   * timestamps on the temporary files grub-mkrescue writes;
+   * mksquashfs refusing explicit times when `SOURCE_DATE_EPOCH` is set.
+
+   Still to do: rebuilders on other machines, and signed hashes.
 2. **dm-verity on the squashfs**, with the root hash on the kernel command
    line. Every block is checked against the hash tree as it is read, including
    during the `toram` copy, so a lying controller cannot substitute blocks.
@@ -249,9 +278,9 @@ modify its own verifier too.
 
 * Secure Boot: the GRUB EFI image is unsigned, so disable Secure Boot or boot in
   legacy mode. The plan is the signed UKI + dm-verity in "Trusting the stick".
-* Reproducible image: pin `snapshot.debian.org` and `SOURCE_DATE_EPOCH`, and
-  publish the hashes. `manifest.txt` already lists every package version and the
-  removed modules.
+* Independent rebuilders. So far the image has been reproduced only on one
+  machine (WSL2 with an Ubuntu 24.04 host). It needs builders on other machines
+  and other host distributions, each signing `image/SHA256SUMS`.
 * Multisig / miniscript: the request format has room (flags bits 4–7).
 * Taproot lets the request carry `sha_prevouts` instead of outpoints, which
   saves about 33 bytes per extra input. This was deliberately not done: it would

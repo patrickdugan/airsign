@@ -17,8 +17,10 @@ Core's base-64 PSBT for it is 516 characters. See [DESIGN.md](DESIGN.md) for why
 and for the comparison with running Bitcoin-Qt offline.
 
 > **Status: experimental, not audited.** Use it on regtest, signet or testnet.
-> The image build is not yet reproducible, and Secure Boot is not supported, so
-> there is no way yet to prove that a given stick carries an unmodified build.
+> The image build is reproducible: rebuild it and compare against
+> [`image/SHA256SUMS`](image/SHA256SUMS). Verified boot (dm-verity and a signed
+> kernel image) is not done yet, so nothing checks that the bytes a laptop
+> boots are the ones that were hashed.
 > [DESIGN.md, "Trusting the stick"](DESIGN.md#trusting-the-stick) describes what
 > a tampered stick could and could not do, and the plan to close that gap.
 
@@ -45,11 +47,27 @@ for the full command list.
 
 ```bash
 cargo test                                                     # unit tests
-cargo build --release --target x86_64-unknown-linux-musl       # static binary for the image
-sudo image/build-image.sh target/x86_64-unknown-linux-musl/release/airsign out/   # ISO (Debian trixie)
+sudo image/build.sh out/                                       # reproducible ISO (see below)
 cargo build --release --features dev && scripts/e2e_regtest.sh # against bitcoind (CORE_BIN=...)
 image/test_qemu.py out/airsign-live.iso qemu-out/              # boots the ISO in QEMU/KVM
+cargo build --release --target x86_64-unknown-linux-musl       # portable static binary for the online side
 ```
+
+**Reproducible build.** `image/build.sh` runs debootstrap on the host once, to
+create a builder chroot from the Debian snapshot pinned in
+[`image/snapshot.env`](image/snapshot.env). Everything else runs inside that
+chroot at fixed paths, using only the snapshot's tools:
+
+* rustc and gcc compile airsign, with crates pinned by `Cargo.lock`;
+* debootstrap builds the image root;
+* squashfs-tools, xorriso and GRUB assemble the squashfs and the ISO.
+
+Every timestamp is set to the snapshot time. The build writes `out/SHA256SUMS`
+covering the ISO, squashfs, kernel, initrd and airsign binary. That file should
+equal the committed [`image/SHA256SUMS`](image/SHA256SUMS). If two people build
+the same commit and get the same `SHA256SUMS`, neither had to trust the other's
+machine. Host requirements: Linux with root, `debootstrap`,
+`debian-archive-keyring`, `git`, and network access.
 
 Write the ISO to a stick with `dd if=airsign-live.iso of=/dev/sdX bs=4M`, or
 with any image writer. The boot menu offers the signer (default), a serial
@@ -69,8 +87,12 @@ Secure Boot must be off for now. The GRUB EFI binary is unsigned (see DESIGN.md
   * zbar decoded both QR codes exactly.
   * Words, two-letter words and QR signed identically.
   * A one-word typo was caught at its line, and a wrong seed was refused.
-* QEMU/KVM, booting from a virtual USB stick with SATA + NVMe disks and two
-  NICs attached (`image/test_qemu.py`): 27/27 passed, on two consecutive runs.
+* Reproducible build (`image/build.sh`, snapshot 20261009T000000Z): two builds,
+  each from a newly created builder and run at different times, produced
+  identical ISO, squashfs, kernel, initramfs and airsign binary. Both builds ran
+  on one machine; no independent rebuilder yet.
+* QEMU/KVM, booting the reproducible ISO from a virtual USB stick with SATA +
+  NVMe disks and two NICs attached (`image/test_qemu.py`): 27/27 passed.
   * In-image self-test: only `lo` exists; no disk is visible; the boot stick is
     deauthorized after boot; `init_on_free` is on; kernel lockdown is set to
     confidentiality; there is no swap and no getty; and signatures match Core.
