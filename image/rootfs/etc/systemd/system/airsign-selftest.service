@@ -1,0 +1,11 @@
+[Unit]
+Description=airsign image self-test (serial console)
+After=airsign-lockdown.service usbguard.service systemd-udev-settle.service
+ConditionKernelCommandLine=airsign.selftest=1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/airsign/selftest.sh
+
+[Install]
+WantedBy=multi-user.target

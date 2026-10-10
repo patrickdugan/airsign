@@ -1,0 +1,39 @@
+[Unit]
+Description=airsign offline signer on tty1
+After=airsign-lockdown.service usbguard.service systemd-user-sessions.service
+Requires=airsign-lockdown.service
+ConditionKernelCommandLine=!airsign.selftest=1
+ConditionKernelCommandLine=!airsign.wipe=1
+# Leaving the menu ("Shut down") ends the session: power off, which frees and
+# (with init_on_free=1) zeroes every page the session used.
+SuccessAction=poweroff
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/airsign menu --live
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+User=signer
+Group=signer
+SupplementaryGroups=video
+LimitMEMLOCK=infinity
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

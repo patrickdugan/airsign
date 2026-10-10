@@ -1,0 +1,27 @@
+[package]
+name = "airsign"
+version = "0.1.0"
+edition = "2021"
+description = "Amnesic air-gapped Bitcoin signer with a compact word/QR transport"
+license = "MIT"
+publish = false
+
+[dependencies]
+bitcoin = { version = "0.32", default-features = false, features = ["std", "base64"] }
+bip39 = { version = "2.1", default-features = false, features = ["std", "zeroize"] }
+qrcode = { version = "0.14", default-features = false }
+getrandom = "0.2"
+zeroize = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[features]
+# Test-only helpers (e.g. printing an xprv descriptor so Bitcoin Core can re-sign
+# and diff). Never enabled in the live image build.
+dev = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
