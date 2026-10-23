@@ -11,6 +11,7 @@
 # controller-level erase; overwriting cannot prove it. Spinning disks are fully
 # covered by the zero pass.
 set -u
+set -o pipefail
 
 # Mirror everything shown (prompts included) to the serial port when there is
 # one, so the wipe can be driven and checked from a test harness.
@@ -47,23 +48,12 @@ if [ ${#DISKS[@]} -eq 0 ]; then
   exit 0
 fi
 
-all_zero_sample() {
-  # 1 MiB at the start, the end, and 62 evenly spaced points.
-  local dev=$1 size=$2 mib=$((1024 * 1024)) i off
-  local blocks=$((size / mib))
-  [ "$blocks" -lt 1 ] && blocks=1
-  for i in $(seq 0 63); do
-    off=$(( i * (blocks - 1) / 63 ))
-    if [ "$(dd if="$dev" bs=$mib skip=$off count=1 iflag=direct 2>/dev/null | tr -d '\000' | head -c1 | wc -c)" != 0 ]; then
-      return 1
-    fi
-  done
-  return 0
-}
-
+# cmp checks every logical byte and fails on a mismatch, premature EOF or
+# read error. Samples alone cannot justify declaring a device wiped.
 all_zero_full() {
-  local dev=$1
-  [ "$(dd if="$dev" bs=4M iflag=direct 2>/dev/null | tr -d '\000' | head -c1 | wc -c)" = 0 ]
+  local dev=$1 size=$2
+  [ "$size" -gt 0 ] || return 1
+  LC_ALL=C cmp -n "$size" /dev/zero "$dev" >/dev/null 2>&1
 }
 
 wipe_one() {
@@ -81,17 +71,20 @@ wipe_one() {
       echo "    discard: not supported"
     fi
   fi
-  if all_zero_sample "$dev" "$size"; then
-    echo "    read-back sample: all zero"
+  if all_zero_full "$dev" "$size"; then
+    echo "    read-back: entire logical device is zero"
   else
-    echo "    read-back still finds data: overwriting every byte with zeros"
-    dd if=/dev/zero of="$dev" bs=4M oflag=direct status=progress 2>&1 | tr '\r' '\n' | tail -n 1
+    echo "    read-back found data or failed; overwriting the logical device"
+    if ! dd if=/dev/zero of="$dev" bs=4M count="$size" iflag=count_bytes oflag=direct status=progress 2>&1 | tr '\r' '\n' | tail -n 1; then
+      echo "    ERROR: overwrite command failed" >&2
+    fi
     sync
   fi
-  if all_zero_full "$dev"; then
-    echo "    VERIFIED: every byte reads back as zero"
+  if all_zero_full "$dev" "$size"; then
+    echo "    VERIFIED: all $size logical bytes read back as zero (SSD spare areas excluded)"
   else
-    echo "    WARNING: $dev did not read back as all zeros"
+    echo "    ERROR: could not verify all logical bytes of $dev" >&2
+    return 1
   fi
 }
 
@@ -101,7 +94,11 @@ for d in "${DISKS[@]}"; do
   printf 'Drive %s  %s GB  model %s  serial %s\n' "$name" "$((size / 1000000000))" "$model" "$serial"
   read -r -p "Type the drive name ($name) to erase it, or press Enter to skip: " answer
   if [ "$answer" = "$name" ]; then
-    wipe_one "$name" "$size"
+    wipe_one "$name" "$size" || {
+      echo "ERASE FAILED: stopping before the next drive." >&2
+      systemctl poweroff || true
+      exit 1
+    }
   else
     echo "    skipped"
   fi

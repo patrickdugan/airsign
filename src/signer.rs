@@ -23,7 +23,7 @@ use crate::request::{xonly_of_p2tr, Dest, KeyPath, SignRequest};
 
 /// Change or receive index above this draws a warning: a coordinator can hide
 /// change at an index the user's wallet will never scan ("ransom" change).
-pub const HIGH_INDEX_WARNING: u32 = 10_000;
+pub const HIGH_INDEX_WARNING: u32 = 1_000;
 
 pub struct Wallet {
     secp: Secp256k1<All>,

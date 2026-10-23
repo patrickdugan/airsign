@@ -4,7 +4,7 @@
 use std::io::{self, BufRead, Write};
 
 use bitcoin::Network;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::codec::{render_transcript, CodecError, LineResult, TranscriptReader, WordStyle};
 use crate::frame::{self, encode_signatures, parse_network, to_qr_string};
@@ -20,7 +20,7 @@ pub struct Session {
 }
 
 fn clear() {
-    print!("\x1b[2J\x1b[H");
+    print!("\x1b[3J\x1b[2J\x1b[H");
     let _ = io::stdout().flush();
 }
 
@@ -38,8 +38,34 @@ pub fn prompt(label: &str) -> String {
     }
 }
 
+/// Read sensitive input directly into a zeroizing buffer, trimming in place
+/// so the original line is never left in an ordinary String allocation.
+fn prompt_secret(label: &str) -> Zeroizing<String> {
+    print!("{label}");
+    let _ = io::stdout().flush();
+    let mut s = Zeroizing::new(String::new());
+    match io::stdin().lock().read_line(&mut s) {
+        Ok(0) | Err(_) => {
+            println!();
+            std::process::exit(0);
+        }
+        Ok(_) => {}
+    }
+    let end = s.trim_end().len();
+    s.truncate(end);
+    let leading = s.len() - s.trim_start().len();
+    if leading > 0 {
+        s.drain(..leading);
+    }
+    s
+}
+
 fn pause(label: &str) {
     prompt(label);
+}
+
+fn backup_word_matches(expected: &str, typed: &str) -> bool {
+    keygen::resolve_bip39_word(typed) == Some(expected)
 }
 
 fn ask_network() -> Network {
@@ -81,7 +107,7 @@ pub fn load_wallet(s: &Session) -> Option<Wallet> {
         let mut cancelled = false;
         let mut scanned = None;
         while n_words < count {
-            let line = Zeroizing::new(prompt(&format!("  words {}-: ", n_words + 1)));
+            let line = prompt_secret(&format!("  words {}-: ", n_words + 1));
             if line.is_empty() {
                 cancelled = true;
                 break;
@@ -139,7 +165,15 @@ pub fn load_wallet(s: &Session) -> Option<Wallet> {
     };
     print!("BIP39 passphrase (Enter for none; not shown): ");
     let _ = io::stdout().flush();
-    let pass = Zeroizing::new(harden::read_line_noecho().unwrap_or_default().trim_end_matches(['\r', '\n']).to_string());
+    let mut pass = match harden::read_line_noecho() {
+        Ok(s) => Zeroizing::new(s),
+        Err(e) => {
+            println!("Unable to read passphrase: {e}");
+            return None;
+        }
+    };
+    let end = pass.trim_end_matches(['\r', '\n']).len();
+    pass.truncate(end);
     let w = Wallet::from_mnemonic(&mnemonic, &pass);
     println!("Seed loaded. Wallet fingerprint: {}", w.fingerprint());
     Some(w)
@@ -174,7 +208,7 @@ pub fn read_frame(s: &Session, what: &str) -> Option<Vec<u8>> {
             line
         };
         let compact: String = text.split_whitespace().collect();
-        if compact.len() > 3 && compact[..3].eq_ignore_ascii_case(frame::QR_PREFIX) {
+        if compact.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case(frame::QR_PREFIX)) {
             match frame::parse_text(&compact) {
                 Ok(f) => return Some(f),
                 Err(e) => {
@@ -267,10 +301,10 @@ fn keygen_flow(_s: &Session) -> Result<(), CodecError> {
     println!("  d          dice ONLY, verifiable elsewhere with sha256 (needs {}+ rolls)", keygen::min_rolls(count));
     let mode = prompt("> ").to_ascii_lowercase();
     let entropy = if mode == "r" || mode == "d" {
-        let mut rolls = String::new();
+        let mut rolls = Zeroizing::new(String::new());
         let want = if mode == "d" { keygen::min_rolls(count) } else { 1 };
         while rolls.len() < want || mode == "r" {
-            let line = prompt(&format!("  rolls so far {} (Enter when done): ", rolls.len()));
+            let line = prompt_secret(&format!("  rolls so far {} (Enter when done): ", rolls.len()));
             if line.is_empty() {
                 if rolls.len() >= want {
                     break;
@@ -279,7 +313,10 @@ fn keygen_flow(_s: &Session) -> Result<(), CodecError> {
                 continue;
             }
             match keygen::clean_rolls(&line) {
-                Ok(r) => rolls.push_str(&r),
+                Ok(mut r) => {
+                    rolls.push_str(&r);
+                    r.zeroize();
+                },
                 Err(e) => println!("  {e}"),
             }
         }
@@ -312,22 +349,21 @@ fn keygen_flow(_s: &Session) -> Result<(), CodecError> {
         pause("[Enter] ");
     }
     clear();
-    println!("Check your copy: type the words it asks for.");
-    let mut picks = [0usize; 3];
-    let r = keygen::os_entropy()?;
-    for (k, p) in picks.iter_mut().enumerate() {
-        *p = (r[k] as usize) % count;
-    }
-    for p in picks {
-        loop {
-            let a = prompt(&format!("  word #{}: ", p + 1));
-            if keygen::resolve_bip39_word(&a) == Some(words[p]) {
-                break;
-            }
-            println!("  No. Check your written copy.");
+    println!("Verify your paper or steel backup by re-entering all {count} words in order.");
+    println!("The seed is hidden. A mismatched or missing word blocks the watch-only export.");
+    for (i, expected) in words.iter().enumerate() {
+        let typed = prompt_secret(&format!("  word #{}: ", i + 1));
+        if typed.is_empty() {
+            return Err(CodecError("Backup verification cancelled; watch-only account not exported".into()));
+        }
+        if !backup_word_matches(expected, &typed) {
+            return Err(CodecError(format!(
+                "Backup word #{} did not match; check your physical copy and restart verification",
+                i + 1
+            )));
         }
     }
-    println!("Copy confirmed.");
+    println!("All {count} backup words confirmed.");
     if prompt("Show the watch-only account for the online wallet now? [Y/n] ").eq_ignore_ascii_case("n") {
         return Ok(());
     }
@@ -403,6 +439,26 @@ pub fn menu(s: &Session) -> i32 {
         if let Err(e) = r {
             println!("error: {e}");
             pause("[Enter] ");
+        }
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn every_backup_word_must_match() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let words: Vec<&str> = m.words().collect();
+        assert!(words.iter().all(|w| backup_word_matches(w, &w[..4])));
+        for n in 0..words.len() {
+            let mut supplied = words.clone();
+            supplied[n] = "zoo";
+            assert!(!supplied.iter().zip(&words).all(|(given, expected)| backup_word_matches(expected, given)));
         }
     }
 }
