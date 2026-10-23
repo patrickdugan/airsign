@@ -20,6 +20,9 @@ Core's base-64 PSBT for it is 516 characters. See [DESIGN.md](DESIGN.md) for why
 and for the comparison with running Bitcoin-Qt offline.
 
 > **Status: experimental, not audited.** Use it on regtest, signet or testnet.
+> Every source or image change requires a fresh reproducible build and updated
+> `image/SHA256SUMS` and `image/ROOTHASH` before signing a release.
+> `image/sign.sh` now refuses artifacts from a different Git commit.
 > The image build is reproducible (compare against
 > [`image/SHA256SUMS`](image/SHA256SUMS)), and boot is verified with your own
 > Secure Boot keys plus dm-verity. That has been tested in QEMU/OVMF, not yet
@@ -124,7 +127,8 @@ vouches for the kernel or the command line.
       the zero-pass fallback after discard left data behind);
     * a stick with one byte of the system image changed was refused before
       anything from it ran, and so was a stick whose hash tree had been deleted;
-    * the unsigned ISO with Secure Boot off booted and still verified its image.
+    * the unsigned ISO with Secure Boot off booted for diagnostics;
+      signing is now gated on Secure Boot and a verified system root.
   * **OVMF with Secure Boot enforcing, SMM build under TCG:**
     * the self-test reports Secure Boot on, a dm-verity root equal to the
       published `ROOTHASH`, only `lo`, no disks, the boot stick deauthorized,

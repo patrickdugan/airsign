@@ -27,7 +27,18 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 die() { echo "sign.sh: $*" >&2; exit 1; }
 
-for f in airsign.efi systemd-bootx64.efi filesystem.squashfs filesystem.squashfs.verity; do
+# An old, correctly hashed ISO is still an old release. Require the build
+# manifest to identify this exact commit and to match its published root hash.
+REPO=$(cd "$HERE/.." && pwd)
+[ -f "$IN/manifest.txt" ] || die "build manifest missing"
+[ -f "$IN/ROOTHASH" ] || die "build root hash missing"
+built_commit=$(awk '$1 == "commit" {print $2; exit}' "$IN/manifest.txt")
+source_commit=$(git -C "$REPO" rev-parse HEAD) || die "source Git checkout unavailable"
+[ "$built_commit" = "$source_commit" ] || die "build from $built_commit does not match checkout $source_commit"
+git -C "$REPO" diff --quiet HEAD -- || die "source checkout has uncommitted changes"
+[ "$(cat "$IN/ROOTHASH")" = "$(cat "$HERE/ROOTHASH")" ] || die "root hash differs from published image/ROOTHASH"
+
+for f in airsign-live.iso airsign.efi systemd-bootx64.efi filesystem.squashfs filesystem.squashfs.verity vmlinuz initrd.img airsign; do
   want=$(awk -v f="$f" '$2 == f { print $1 }' "$SUMS")
   [ -n "$want" ] || die "no published hash for $f in $SUMS"
   [ "$(sha256sum "$IN/$f" | cut -d' ' -f1)" = "$want" ] || die "$f does not match the published hash; refusing to sign it"
