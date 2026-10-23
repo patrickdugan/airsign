@@ -12,5 +12,5 @@ for _ in $(seq 1 60); do
   grep -qE '^(usb_storage|uas) ' /proc/modules || exit 0
   sleep 0.5
 done
-echo "airsign-unload-storage: USB storage driver still loaded after 30 s (USBGuard still refuses storage devices)"
-exit 0
+echo "airsign-unload-storage: USB storage driver still loaded after 30 s; refusing signing session" >&2
+exit 1

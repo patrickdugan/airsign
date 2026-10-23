@@ -63,7 +63,7 @@ sed -i 's/^PresentDevicePolicy=.*/PresentDevicePolicy=apply-policy/; s/^Implicit
 chroot "$ROOT" useradd --system --no-create-home --shell /usr/sbin/nologin --groups video signer
 chroot "$ROOT" passwd -l root >/dev/null
 
-chroot "$ROOT" systemctl enable airsign.service airsign-lockdown.service airsign-unload-storage.service \
+chroot "$ROOT" systemctl enable airsign.service airsign-lockdown.service airsign-verify-boot.service airsign-unload-storage.service \
   airsign-selftest.service airsign-wipe.service usbguard.service >/dev/null 2>&1
 chroot "$ROOT" systemctl set-default multi-user.target >/dev/null 2>&1
 # Nothing to log in to: no gettys on any virtual terminal.

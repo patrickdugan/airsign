@@ -1,0 +1,15 @@
+[Unit]
+Description=airsign: enforce Secure Boot and dm-verity before signing
+After=local-fs.target airsign-lockdown.service
+Requires=airsign-lockdown.service
+Before=airsign.service
+ConditionKernelCommandLine=!airsign.selftest=1
+ConditionKernelCommandLine=!airsign.wipe=1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/airsign/verify-boot.sh
+
+[Install]
+WantedBy=multi-user.target

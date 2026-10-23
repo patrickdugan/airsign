@@ -1,0 +1,27 @@
+name: Airsign security checks
+
+on:
+  push:
+    branches: [main, 'security/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Rust unit tests
+        run: cargo +stable test --locked
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' path; do
+            if head -n 1 "$path" | grep -q '^#!/bin/bash'; then
+              bash -n "$path"
+            elif head -n 1 "$path" | grep -q '^#!/bin/sh'; then
+              sh -n "$path"
+            fi
+          done < <(find image scripts -type f -print0)

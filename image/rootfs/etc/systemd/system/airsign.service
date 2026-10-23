@@ -1,7 +1,8 @@
 [Unit]
 Description=airsign offline signer on tty1
-After=airsign-lockdown.service usbguard.service systemd-user-sessions.service
-Requires=airsign-lockdown.service
+After=airsign-lockdown.service airsign-verify-boot.service usbguard.service airsign-unload-storage.service systemd-user-sessions.service
+Requires=airsign-lockdown.service airsign-verify-boot.service airsign-unload-storage.service
+BindsTo=usbguard.service
 ConditionKernelCommandLine=!airsign.selftest=1
 ConditionKernelCommandLine=!airsign.wipe=1
 # Leaving the menu ("Shut down") ends the session: power off, which frees and

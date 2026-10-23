@@ -27,8 +27,10 @@ AIRSIGN: powering off in 30 seconds."
   echo "$msg"
   [ -c /dev/tty1 ] && echo "$msg" > /dev/tty1
   sleep 30
-  echo o > /proc/sysrq-trigger
-  sleep 60
+  # Failure must never return to live-boot, even if power-off is unavailable.
+  echo o > /proc/sysrq-trigger 2>/dev/null || true
+  poweroff -f 2>/dev/null || true
+  while :; do sleep 3600; done
 }
 
 expected=""
