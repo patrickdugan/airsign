@@ -65,6 +65,7 @@ pub fn read_line_noecho() -> std::io::Result<String> {
 pub fn scan_qr_with_zbarcam(device: &str) -> Result<String, String> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+    use zeroize::Zeroize;
     let mut cmd = Command::new("zbarcam");
     cmd.args(["--raw", "--nodisplay", "--oneshot", "-Sdisable", "-Sqrcode.enable", device])
         .stdin(Stdio::null())
@@ -81,10 +82,15 @@ pub fn scan_qr_with_zbarcam(device: &str) -> Result<String, String> {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
     }
     match out {
-        Ok(o) if o.status.success() => {
-            Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        Ok(mut o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            o.stdout.zeroize();
+            Ok(text)
         }
-        Ok(_) => Err("scan cancelled or camera not available".into()),
+        Ok(mut o) => {
+            o.stdout.zeroize();
+            Err("scan cancelled or camera not available".into())
+        }
         Err(e) => Err(format!("cannot run zbarcam ({e}); is a camera scanner installed?")),
     }
 }

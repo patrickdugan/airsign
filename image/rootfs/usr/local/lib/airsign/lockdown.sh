@@ -12,7 +12,9 @@ say() {
 # If it could not (too little RAM), /run/live/medium is still the stick itself.
 src=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null || true)
 fstype=$(findmnt -n -o FSTYPE /run/live/medium 2>/dev/null || true)
-if [ -n "$src" ] && [ "$fstype" != tmpfs ] && [ -b "$src" ]; then
+# Require proof that live-boot actually copied the image into RAM.
+if ! grep -Eq '(^|[[:space:]])toram([[:space:]]|$)' /proc/cmdline || \
+   [ -z "$src" ] || [ "$fstype" != tmpfs ]; then
   say "airsign could not copy itself into memory (is there at least 2 GB of RAM?)."
   say "Refusing to start: the boot stick would still be in use. Powering off in 60 s."
   sleep 60

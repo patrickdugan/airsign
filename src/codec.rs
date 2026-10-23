@@ -425,28 +425,38 @@ impl TranscriptReader {
         let body = &body[..];
         let mut data = self.data.clone();
         data.extend_from_slice(body);
-        if self.expected_len.is_none() {
-            let mut r = Reader::new(&data);
-            let n = r.uleb().map_err(|_| CodecError("bad length prefix on line 1".into()))? as usize;
-            if n == 0 || n > 4096 {
-                return err("length prefix on line 1 is out of range");
+        // A failed line cannot mutate the transcript length or cursor.
+        let expected_len = match self.expected_len {
+            Some(n) => n,
+            None => {
+                let mut r = Reader::new(&data);
+                let n = r.uleb().map_err(|_| CodecError("bad length prefix on line 1".into()))? as usize;
+                if n == 0 || n > 4096 {
+                    return err("length prefix on line 1 is out of range");
+                }
+                n
             }
-            self.expected_len = Some(n);
-        }
-        let total = self.total_lines().unwrap();
+        };
+        let mut prefix = Vec::new();
+        put_uleb(&mut prefix, expected_len as u64);
+        let total = (prefix.len() + expected_len).div_ceil(LINE_BYTES);
         let is_last = self.lines_seen + 1 == total;
         if !is_last && body.len() != LINE_BYTES {
             return err(format!("line {} should have {} words plus the check word", self.lines_seen + 1, LINE_BYTES));
         }
-        self.data = data;
-        self.lines_seen += 1;
         if is_last {
-            let mut r = Reader::new(&self.data);
+            let mut r = Reader::new(&data);
             let n = r.uleb()? as usize;
             let frame = r.bytes(n).map_err(|_| CodecError("last line is too short".into()))?.to_vec();
             r.finish().map_err(|_| CodecError("last line has extra words".into()))?;
+            self.data = data;
+            self.expected_len = Some(expected_len);
+            self.lines_seen += 1;
             return Ok(LineResult::Done(frame));
         }
+        self.data = data;
+        self.expected_len = Some(expected_len);
+        self.lines_seen += 1;
         Ok(LineResult::NeedMore { line: self.lines_seen + 1, total: Some(total) })
     }
 }
@@ -456,8 +466,11 @@ pub fn parse_transcript(text: &str) -> Result<Vec<u8>, CodecError> {
     let lines: Vec<&str> = text.lines().filter(|l| l.chars().any(|c| c.is_ascii_alphabetic())).collect();
     let mut reader = TranscriptReader::new();
     if lines.len() > 1 {
-        for line in &lines {
+        for (i, line) in lines.iter().enumerate() {
             if let LineResult::Done(frame) = reader.push_line(line)? {
+                if i + 1 != lines.len() {
+                    return err("extra lines after the completed transcript");
+                }
                 return Ok(frame);
             }
         }
@@ -496,6 +509,29 @@ pub fn parse_transcript(text: &str) -> Result<Vec<u8>, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_first_line_does_not_poison_transcript_state() {
+        let frame = crate::frame::seal(crate::frame::Kind::Request, &[7u8; 20]);
+        let partial = [frame.len() as u8];
+        let first = format!(
+            "{} {}",
+            BYTEWORDS[partial[0] as usize],
+            BYTEWORDS[line_check(0, &partial) as usize]
+        );
+        let mut reader = TranscriptReader::new();
+        assert!(reader.push_line(&first).is_err());
+        assert_eq!(reader.total_lines(), None);
+        let text = render_transcript(&frame, WordStyle::Full);
+        let mut result = None;
+        for line in text.lines() {
+            if let LineResult::Done(f) = reader.push_line(line).unwrap() {
+                result = Some(f);
+            }
+        }
+        assert_eq!(result, Some(frame));
+        assert!(parse_transcript(&format!("{text}able able\n")).is_err());
+    }
 
     #[test]
     fn bytewords_list_properties() {
