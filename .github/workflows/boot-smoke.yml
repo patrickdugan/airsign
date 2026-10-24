@@ -68,13 +68,31 @@ jobs:
             "$RUNNER_TEMP/airsign-smoke-image" \
             "$RUNNER_TEMP/airsign-smoke-keys" \
             "$RUNNER_TEMP/airsign-smoke-results" SU
+      - name: Test live signing, disposable disk wipe, tampering and Secure Boot refusal
+        shell: bash
+        env:
+          OVMF_SMM: '1'
+          QEMU_ACCEL: tcg
+          AIRSIGN: ${{ github.workspace }}/target/release/airsign
+        run: |
+          set -euo pipefail
+          # No real wallet keys or real disks: the harness uses disposable
+          # QEMU images, known BIP39 test vectors, and ephemeral firmware keys.
+          cargo +stable build --release --locked
+          python3 image/test_qemu.py \
+            "$RUNNER_TEMP/airsign-smoke-image" \
+            "$RUNNER_TEMP/airsign-smoke-keys" \
+            "$RUNNER_TEMP/airsign-adversarial-results" IWTFK
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: failure()
+        if: always()
         with:
           name: airsign-qemu-smoke-diagnostics-${{ github.sha }}
           path: |
             ${{ runner.temp }}/airsign-smoke-results/*.serial.log
             ${{ runner.temp }}/airsign-smoke-results/*.png
             ${{ runner.temp }}/airsign-smoke-results/*.qemu.log
+            ${{ runner.temp }}/airsign-adversarial-results/*.serial.log
+            ${{ runner.temp }}/airsign-adversarial-results/*.png
+            ${{ runner.temp }}/airsign-adversarial-results/*.qemu.log
           retention-days: 7
           if-no-files-found: ignore
