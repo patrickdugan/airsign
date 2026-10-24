@@ -123,7 +123,7 @@ def make_vars(name, keyset=None):
     guid = open(os.path.join(k, "owner.guid")).read().strip()
     run("virt-fw-vars", "--input", BLANK_VARS, "--output", path,
         "--set-pk", guid, f"{k}/PK.crt", "--add-kek", guid, f"{k}/KEK.crt",
-        "--add-db", guid, f"{k}/db.crt", "--no-microsoft", "--secure-boot")
+        "--add-db", guid, f"{k}/db.crt", "--no-microsoft", "--sb")
     return path
 
 
