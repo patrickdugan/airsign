@@ -19,9 +19,8 @@ jobs:
         run: |
           set -euo pipefail
           while IFS= read -r -d '' path; do
-            if head -n 1 "$path" | grep -q '^#!/bin/bash'; then
-              bash -n "$path"
-            elif head -n 1 "$path" | grep -q '^#!/bin/sh'; then
-              sh -n "$path"
-            fi
+            case "$(head -n 1 "$path")" in
+              '#!/bin/bash'|'#!/usr/bin/bash'|'#!/usr/bin/env bash') bash -n "$path" ;;
+              '#!/bin/sh'|'#!/usr/bin/sh'|'#!/usr/bin/env sh') sh -n "$path" ;;
+            esac
           done < <(find image scripts -type f -print0)

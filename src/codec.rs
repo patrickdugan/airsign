@@ -194,10 +194,15 @@ pub fn b32_encode(data: &[u8]) -> String {
 }
 
 pub fn b32_decode(s: &str) -> Result<Vec<u8>, CodecError> {
+    // Casting a Unicode char to u8 truncates its code point; non-ASCII
+    // characters could silently become valid base-32 alphabet characters.
+    if !s.is_ascii() {
+        return err("base-32 frames must use ASCII characters");
+    }
     let mut out = Vec::with_capacity(s.len() * 5 / 8);
     let (mut acc, mut bits) = (0u32, 0u32);
-    for c in s.chars() {
-        let c = c.to_ascii_lowercase() as u8;
+    for c in s.bytes() {
+        let c = c.to_ascii_lowercase();
         let v = match B32.iter().position(|&x| x == c) {
             Some(v) => v as u32,
             None => return err(format!("'{}' is not a base-32 character", c as char)),
@@ -590,6 +595,10 @@ mod tests {
         // An extra trailing character is excess padding.
         let s = b32_encode(&[1, 2, 3]);
         assert!(b32_decode(&format!("{s}Q")).is_err());
+        // U+0171 has low byte 0x71 ('q'). Truncating char -> u8 used to
+        // accept it as a valid QR/base-32 character.
+        assert_eq!(b32_decode("QQQQQQQQ").unwrap(), vec![0; 5]);
+        assert!(b32_decode("űQQQQQQQ").is_err());
     }
 
     #[test]
