@@ -29,6 +29,11 @@ and for the comparison with running Bitcoin-Qt offline.
 > on a physical laptop's firmware. See
 > [DESIGN.md, "Trusting the stick"](DESIGN.md#trusting-the-stick).
 
+For the security threat model, release gates and physical-machine acceptance
+procedure, see [SECURITY.md](SECURITY.md). A passing Rust/shell CI job does not
+certify an image or a physical signer for mainnet.
+
+
 ## Use
 
 Online machine (Bitcoin Core 31+, watch-only):
