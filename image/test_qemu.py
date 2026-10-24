@@ -30,8 +30,8 @@ and ONLY the owner's PK/KEK/db enrolled (no Microsoft keys).
      T5 the unsigned ISO
   K  firmware in Setup Mode + signed stick: "Enroll Secure Boot keys: airsign"
      from the menu, then the next boot must run with Secure Boot on (SMM build)
-  U  the unsigned ISO with Secure Boot off still boots and still verifies the
-     image (the Secure Boot check is expected to report off)
+  U  the unsigned ISO with Secure Boot off remains diagnostic-only:
+     dm-verity verifies the image but the signer preflight must refuse it
   X  explore: screenshots of the first seconds of a signed boot (calibration)
 
 Needs: qemu-system-x86_64 (KVM), OVMF (secboot build), virt-fw-vars, zbarimg,
@@ -372,8 +372,9 @@ def test_selftest(iso, vars_t, tag="S-selftest", expect_sb=True):
             line = line.strip()
             if line.startswith(("PASS  ", "FAIL  ")):
                 name, ok = line[6:], line.startswith("PASS")
-                if name == "booted through UEFI Secure Boot" and not expect_sb:
-                    record(f"{tag}: [in image] Secure Boot reported off, as expected", not ok)
+                if name in ("booted through UEFI Secure Boot",
+                            "signer verified-boot preflight accepts this image") and not expect_sb:
+                    record(f"{tag}: [in image] {name} refused the unsigned boot, as expected", not ok)
                 else:
                     record(f"{tag}: [in image] {name}", ok)
             elif line.startswith(("secure boot:", "net interfaces:", "block devices:", "usb devices:")):
