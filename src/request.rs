@@ -444,3 +444,85 @@ mod tests {
         assert!(SignRequest::decode(&f).is_err());
     }
 }
+
+#[cfg(test)]
+mod signer_pipeline_regressions {
+    use super::*;
+    use bitcoin::bip32::DerivationPath;
+    use bitcoin::transaction::Version;
+    use bitcoin::{absolute::LockTime, Amount, Sequence, Transaction, TxIn, Witness};
+    use std::str::FromStr;
+
+    /// A synthetic Sparrow-style BIP86 PSBT: x-only key origins on inputs
+    /// and change, plus witness UTXO metadata. The end-to-end Core regtest
+    /// harness independently tests consensus acceptance and fee handling.
+    #[test]
+    fn taproot_psbt_origin_and_change_reach_the_offline_signer() {
+        let seed = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        ).unwrap();
+        let wallet = crate::signer::Wallet::from_mnemonic(&seed, "");
+        let net = Network::Regtest;
+        let recv = KeyPath { change: false, index: 0 };
+        let change = KeyPath { change: true, index: 0 };
+        let spent_script = wallet.own_script(net, 0, recv);
+        let change_script = wallet.own_script(net, 0, change);
+        let destination = ScriptBuf::from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6").unwrap();
+
+        let unsigned = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint { txid: Txid::from_byte_array([0x42; 32]), vout: 1 },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence(0xffff_fffd),
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut { value: Amount::from_sat(75_000), script_pubkey: destination.clone() },
+                TxOut { value: Amount::from_sat(123_000), script_pubkey: change_script.clone() },
+            ],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned).unwrap();
+        psbt.inputs[0].witness_utxo = Some(
+            TxOut { value: Amount::from_sat(200_000), script_pubkey: spent_script }
+        );
+
+        let fp = wallet.fingerprint();
+        let recv_origin = DerivationPath::from_str("m/86h/1h/0h/0/0").unwrap();
+        let change_origin = DerivationPath::from_str("m/86h/1h/0h/1/0").unwrap();
+        psbt.inputs[0].tap_key_origins.insert(
+            wallet.internal_key(net, 0, recv), (vec![], (fp, recv_origin))
+        );
+        psbt.outputs[1].tap_key_origins.insert(
+            wallet.internal_key(net, 0, change), (vec![], (fp, change_origin))
+        );
+
+        // Round-trip through the exact binary serialization Sparrow can export.
+        let imported = Psbt::deserialize(&psbt.serialize()).unwrap();
+        let req = SignRequest::from_psbt(wallet.secp(), &imported, net).unwrap();
+        assert!(matches!(req.outputs[1].dest, Dest::Own(KeyPath { change: true, index: 0 })));
+        let offline = SignRequest::decode(&req.encode()).unwrap();
+        let review = crate::signer::review(&wallet, &offline).unwrap();
+        assert_eq!(review.fee, 2_000);
+        assert_eq!(review.tx.output[0].script_pubkey, destination);
+        assert_eq!(review.tx.output[1].script_pubkey, change_script);
+        let signatures = crate::signer::sign(&wallet, &offline, &review).unwrap();
+        let mut psbt_copy = imported.clone();
+        let tx = crate::combine::combine(&mut psbt_copy, &signatures).unwrap();
+        assert_eq!(tx.output, review.tx.output);
+        assert_eq!(tx.input[0].witness.len(), 1);
+
+        // A coordinator that lies about its input derivation must be refused.
+        let mut spoof = imported.clone();
+        spoof.inputs[0].tap_key_origins.clear();
+        assert!(SignRequest::from_psbt(wallet.secp(), &spoof, net).is_err());
+
+        // With origin metadata stripped, a change output becomes an explicit
+        // external output for human review, never silently classified as own.
+        let mut unlabeled = imported;
+        unlabeled.outputs[1].tap_key_origins.clear();
+        let changed = SignRequest::from_psbt(wallet.secp(), &unlabeled, net).unwrap();
+        assert!(matches!(changed.outputs[1].dest, Dest::Script(_)));
+    }
+}

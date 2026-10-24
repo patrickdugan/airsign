@@ -95,7 +95,7 @@ run_case() {
   python3 - "$OUT/$name.signed.psbt" <<'PY'
 import sys
 with open(sys.argv[1], "rb") as f:
-    assert f.read(5) == b"psbt\\xff", "signed PSBT must use binary PSBT magic"
+    assert f.read(5) == b"psbt\xff", "signed PSBT must use binary PSBT magic"
 PY
   pass "signed PSBT exported as binary file with identical transaction"
   cli testmempoolaccept "[\"$(cat "$DD/tx.hex")\"]" | json 'd[0]["allowed"]' | grep -q True \
