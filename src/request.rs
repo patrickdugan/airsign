@@ -21,7 +21,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::key::XOnlyPublicKey;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{Secp256k1, Verification};
-use bitcoin::{Network, OutPoint, ScriptBuf, Sequence, TxOut, Txid};
+use bitcoin::{Network, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid};
 
 use crate::codec::{err, put_uleb, CodecError, Reader};
 use crate::frame::{coin_type, expect, net_code, net_from_code, seal, Kind};
@@ -120,6 +120,35 @@ fn script_from_template(kind: u8, r: &mut Reader) -> Result<ScriptBuf, CodecErro
         k => return err(format!("unknown output kind {k}")),
     };
     Ok(ScriptBuf::from_bytes(v))
+}
+
+/// Check every available source for the spent output. A PSBT may carry both
+/// witness_utxo and non_witness_utxo; accepting inconsistent copies would let
+/// the coordinator give different amounts or scripts to different components.
+pub fn spent_output_from_psbt(
+    txin: &TxIn,
+    pin: &bitcoin::psbt::Input,
+    n: usize,
+) -> Result<TxOut, CodecError> {
+    let prevout = match &pin.non_witness_utxo {
+        Some(prev) => {
+            if prev.compute_txid() != txin.previous_output.txid {
+                return err(format!("input {n}: non_witness_utxo txid does not match outpoint"));
+            }
+            Some(prev.output.get(txin.previous_output.vout as usize)
+                .cloned()
+                .ok_or_else(|| CodecError(format!("input {n}: non_witness_utxo vout is out of range")))?)
+        }
+        None => None,
+    };
+    match (&pin.witness_utxo, prevout) {
+        (Some(witness), Some(full)) if *witness != full => {
+            err(format!("input {n}: witness_utxo disagrees with non_witness_utxo"))
+        }
+        (Some(witness), _) => Ok(witness.clone()),
+        (None, Some(full)) => Ok(full),
+        (None, None) => err(format!("input {n}: PSBT lacks the spent output")),
+    }
 }
 
 impl SignRequest {
@@ -266,19 +295,7 @@ impl SignRequest {
         let mut account: Option<(Fingerprint, u32)> = None;
         let mut inputs = Vec::new();
         for (n, (txin, pin)) in tx.input.iter().zip(&psbt.inputs).enumerate() {
-            let utxo: TxOut = match (&pin.witness_utxo, &pin.non_witness_utxo) {
-                (Some(w), _) => w.clone(),
-                (None, Some(prev)) => {
-                    if prev.compute_txid() != txin.previous_output.txid {
-                        return err(format!("input {n}: non_witness_utxo does not match the outpoint"));
-                    }
-                    prev.output
-                        .get(txin.previous_output.vout as usize)
-                        .cloned()
-                        .ok_or_else(|| CodecError(format!("input {n}: outpoint index out of range")))?
-                }
-                (None, None) => return err(format!("input {n}: PSBT lacks the spent output (witness_utxo)")),
-            };
+            let utxo = spent_output_from_psbt(txin, pin, n)?;
             if !utxo.script_pubkey.is_p2tr() {
                 return err(format!("input {n}: not a taproot output; airsign v1 signs BIP86 single-key taproot only"));
             }
@@ -469,11 +486,27 @@ mod signer_pipeline_regressions {
         let change_script = wallet.own_script(net, 0, change);
         let destination = ScriptBuf::from_hex("0014751e76e8199196d454941c45d1b3a323f1433bd6").unwrap();
 
+        // Construct the previous transaction so non_witness_utxo and
+        // witness_utxo can be checked against the same genuine outpoint.
+        let prior = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![
+                TxOut { value: Amount::from_sat(1), script_pubkey: ScriptBuf::new() },
+                TxOut { value: Amount::from_sat(200_000), script_pubkey: spent_script.clone() },
+            ],
+        };
         let unsigned = Transaction {
             version: Version::TWO,
             lock_time: LockTime::ZERO,
             input: vec![TxIn {
-                previous_output: OutPoint { txid: Txid::from_byte_array([0x42; 32]), vout: 1 },
+                previous_output: OutPoint { txid: prior.compute_txid(), vout: 1 },
                 script_sig: ScriptBuf::new(),
                 sequence: Sequence(0xffff_fffd),
                 witness: Witness::new(),
@@ -487,6 +520,7 @@ mod signer_pipeline_regressions {
         psbt.inputs[0].witness_utxo = Some(
             TxOut { value: Amount::from_sat(200_000), script_pubkey: spent_script }
         );
+        psbt.inputs[0].non_witness_utxo = Some(prior);
 
         let fp = wallet.fingerprint();
         let recv_origin = DerivationPath::from_str("m/86h/1h/0h/0/0").unwrap();
@@ -508,6 +542,10 @@ mod signer_pipeline_regressions {
         assert_eq!(review.tx.output[0].script_pubkey, destination);
         assert_eq!(review.tx.output[1].script_pubkey, change_script);
         let signatures = crate::signer::sign(&wallet, &offline, &review).unwrap();
+        let mut conflict = imported.clone();
+        conflict.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(200_001);
+        assert!(SignRequest::from_psbt(wallet.secp(), &conflict, net).is_err());
+        assert!(crate::combine::combine(&mut conflict, &signatures).is_err());
         let mut psbt_copy = imported.clone();
         let tx = crate::combine::combine(&mut psbt_copy, &signatures).unwrap();
         assert_eq!(tx.output, review.tx.output);
