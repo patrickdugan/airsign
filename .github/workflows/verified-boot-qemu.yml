@@ -40,7 +40,7 @@ jobs:
             bash image/build.sh "$RUNNER_TEMP/airsign-candidate"
           diff -u image/ROOTHASH "$RUNNER_TEMP/airsign-candidate/ROOTHASH"
           diff -u image/SHA256SUMS "$RUNNER_TEMP/airsign-candidate/SHA256SUMS"
-          (cd "$RUNNER_TEMP/airsign-candidate" && sha256sum --check "$GITHUB_WORKSPACE/image/SHA256SUMS")
+          (cd "$RUNNER_TEMP/airsign-candidate" && sudo sha256sum --check "$GITHUB_WORKSPACE/image/SHA256SUMS")
       - name: Generate ephemeral test-only owner and attacker Secure Boot keys
         shell: bash
         run: |
