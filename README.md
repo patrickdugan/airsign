@@ -40,6 +40,20 @@ airsign request --network main --psbt <base64>  # prints words, two-letter words
 airsign combine --psbt <base64> --signatures AS1...   # raw tx hex, ready for sendrawtransaction
 ```
 
+**Before funding a new airsign wallet:** generate the seed inside the verified
+offline boot and complete the full handwritten-backup check. The offline menu
+shows the first BIP86 receive address at `m/86'/coin'/account'/0/0`. Compare
+every character against the online watch-only wallet's first receive address
+before transferring coins. Repeat that check with menu option 3 after importing
+the account. Seed words and backup checks are entered with terminal echo
+disabled. Never scan a SeedQR using an internet-connected device.
+
+**Migrating from a Sparrow hot wallet:** restoring the same seed on an air-gapped
+PC cannot undo earlier exposure. For a new cold-storage boundary, create a
+different seed offline and send coins to an offline-verified receive address.
+Airsign v1 signs only single-key BIP86 Taproot transactions; it cannot directly
+cosign an existing BitGo 2-of-3 multisig vault.
+
 Offline machine: boot the stick and pick **Sign a transaction**. Enter the seed
 (four letters per word, or scan a SeedQR), then the request (scan, type the
 words line by line, or paste `AS1...`). Check the review screen and type `sign`.

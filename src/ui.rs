@@ -43,14 +43,15 @@ pub fn prompt(label: &str) -> String {
 fn prompt_secret(label: &str) -> Zeroizing<String> {
     print!("{label}");
     let _ = io::stdout().flush();
-    let mut s = Zeroizing::new(String::new());
-    match io::stdin().lock().read_line(&mut s) {
-        Ok(0) | Err(_) => {
-            println!();
+    // Mnemonics, backup verification and dice rolls must never echo onto tty1.
+    let mut s = match harden::read_line_noecho() {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("Secure input unavailable: {e}");
             std::process::exit(0);
         }
-        Ok(_) => {}
-    }
+    };
     let end = s.trim_end().len();
     s.truncate(end);
     let leading = s.len() - s.trim_start().len();
@@ -66,6 +67,18 @@ fn pause(label: &str) {
 
 fn backup_word_matches(expected: &str, typed: &str) -> bool {
     keygen::resolve_bip39_word(typed) == Some(expected)
+}
+
+fn show_first_receive_address(w: &Wallet, network: Network, account: u32) {
+    clear();
+    println!("First receiving address, derived on this OFFLINE computer:");
+    println!("  m/86h/{}h/{}h/0/0", frame::coin_type(network), account);
+    println!("  {}", w.receive_address(network, account, 0));
+    println!();
+    println!("Record this address and compare it character-for-character with the");
+    println!("online watch-only wallet's first receive address BEFORE depositing BTC.");
+    println!("You can repeat this check from menu option 3 at any time.");
+    pause("\n[Enter] display the watch-only account QR: ");
 }
 
 fn ask_network() -> Network {
@@ -99,7 +112,7 @@ fn ask_word_count() -> usize {
 pub fn load_wallet(s: &Session) -> Option<Wallet> {
     let count = ask_word_count();
     let mnemonic = loop {
-        println!("Type your {count} words; several per line is fine. Four letters of each word are enough.");
+        println!("Type your {count} words (entry is hidden); several per line is fine. Four letters of each word are enough.");
         println!("Or type 'scan' to read a SeedQR with the camera. Empty line = cancel.");
         // The phrase is built straight into a zeroizing buffer.
         let mut phrase = Zeroizing::new(String::new());
@@ -166,7 +179,7 @@ pub fn load_wallet(s: &Session) -> Option<Wallet> {
     print!("BIP39 passphrase (Enter for none; not shown): ");
     let _ = io::stdout().flush();
     let mut pass = match harden::read_line_noecho() {
-        Ok(s) => Zeroizing::new(s),
+        Ok(s) => s,
         Err(e) => {
             println!("Unable to read passphrase: {e}");
             return None;
@@ -368,6 +381,7 @@ fn keygen_flow(_s: &Session) -> Result<(), CodecError> {
         return Ok(());
     }
     let net = ask_network();
+    show_first_receive_address(&w, net, 0);
     show_frame(&w.account_export(net, 0).encode(), "Watch-only account 0: import on the online computer");
     Ok(())
 }
@@ -385,6 +399,7 @@ fn export_flow(s: &Session) -> Result<(), CodecError> {
             _ => println!("  not a valid account number"),
         }
     };
+    show_first_receive_address(&w, net, account);
     show_frame(&w.account_export(net, account).encode(), &format!("Watch-only account {account}"));
     Ok(())
 }

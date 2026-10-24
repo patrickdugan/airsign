@@ -29,34 +29,51 @@ pub fn harden() -> Vec<String> {
     vec!["not running on Linux: no memory locking or core-dump suppression".into()]
 }
 
-/// Read a line with terminal echo off when stdin is a terminal.
+/// Read a secret without echo. Keep the input buffer zeroizing, and always
+/// restore terminal echo after an I/O failure or an unwinding panic.
 #[cfg(target_os = "linux")]
-pub fn read_line_noecho() -> std::io::Result<String> {
-    use std::io::BufRead;
-    unsafe {
-        let mut term: libc::termios = std::mem::zeroed();
-        let is_tty = libc::isatty(0) == 1 && libc::tcgetattr(0, &mut term) == 0;
-        let saved = term;
-        if is_tty {
-            term.c_lflag &= !libc::ECHO;
-            libc::tcsetattr(0, libc::TCSANOW, &term);
+pub fn read_line_noecho() -> std::io::Result<zeroize::Zeroizing<String>> {
+    use std::io::{self, BufRead};
+
+    struct RestoreEcho(Option<libc::termios>);
+    impl Drop for RestoreEcho {
+        fn drop(&mut self) {
+            if let Some(saved) = &self.0 {
+                unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, saved); }
+            }
         }
-        let mut s = String::new();
-        let r = std::io::stdin().lock().read_line(&mut s);
-        if is_tty {
-            libc::tcsetattr(0, libc::TCSANOW, &saved);
-            println!();
-        }
-        r.map(|_| s)
     }
+
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+    let mut restore = RestoreEcho(None);
+    if is_tty {
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut saved) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut hidden = saved;
+        hidden.c_lflag &= !(libc::ECHO | libc::ECHONL);
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &hidden) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        restore.0 = Some(saved);
+    }
+    let mut secret = zeroize::Zeroizing::new(String::new());
+    let result = io::stdin().lock().read_line(&mut secret);
+    drop(restore);
+    if is_tty {
+        println!();
+    }
+    result?;
+    Ok(secret)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn read_line_noecho() -> std::io::Result<String> {
+pub fn read_line_noecho() -> std::io::Result<zeroize::Zeroizing<String>> {
     use std::io::BufRead;
-    let mut s = String::new();
-    std::io::stdin().lock().read_line(&mut s)?;
-    Ok(s)
+    let mut secret = zeroize::Zeroizing::new(String::new());
+    std::io::stdin().lock().read_line(&mut secret)?;
+    Ok(secret)
 }
 
 /// Run the QR scanner with Ctrl-C delivered to it but not to us, so cancelling a

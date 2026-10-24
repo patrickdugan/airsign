@@ -101,6 +101,13 @@ impl Wallet {
         ScriptBuf::new_p2tr(&self.secp, self.internal_key(network, account, path), None)
     }
 
+    /// The address to verify against an online coordinator before funding.
+    /// Derive it locally from the same key path used when signing.
+    pub fn receive_address(&self, network: Network, account: u32, index: u32) -> Address {
+        let script = self.own_script(network, account, KeyPath { change: false, index });
+        Address::from_script(&script, network).expect("BIP86 has a standard receiving address")
+    }
+
     /// BIP32 extended private key descriptor for the account, so a test can
     /// load the same key into Bitcoin Core and compare signatures.
     #[cfg(feature = "dev")]
@@ -303,4 +310,26 @@ pub fn sign(w: &Wallet, req: &SignRequest, rv: &Review) -> Result<Vec<schnorr::S
         sigs.push(sig);
     }
     Ok(sigs)
+}
+
+#[cfg(test)]
+mod bip86_address_tests {
+    use super::*;
+
+    #[test]
+    fn receiving_address_matches_bip86_reference_vector() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        ).unwrap();
+        let w = Wallet::from_mnemonic(&m, "");
+        // BIP86 official test vectors, first two receive addresses.
+        assert_eq!(
+            w.receive_address(Network::Bitcoin, 0, 0).to_string(),
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+        );
+        assert_eq!(
+            w.receive_address(Network::Bitcoin, 0, 1).to_string(),
+            "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh",
+        );
+    }
 }
