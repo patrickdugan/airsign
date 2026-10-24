@@ -1,0 +1,54 @@
+name: Bitcoin Core regtest integration
+
+on:
+  push:
+    branches: ['security/**', main]
+    paths:
+      - 'src/**'
+      - 'scripts/e2e_regtest.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/regtest.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/e2e_regtest.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/regtest.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  regtest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build instrumented signer
+        run: cargo +stable build --release --locked --features dev
+      - name: Install QR decoding and terminal helpers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zbar-tools bsdextrautils
+      - name: Download pinned Bitcoin Core 31.1 for regtest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl --fail --location --retry 3 --silent --show-error \
+            -o bitcoin-31.1-x86_64-linux-gnu.tar.gz \
+            https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz
+          echo 'b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e  bitcoin-31.1-x86_64-linux-gnu.tar.gz' | sha256sum --check --strict
+          tar -xzf bitcoin-31.1-x86_64-linux-gnu.tar.gz
+          "$RUNNER_TEMP/bitcoin-31.1/bin/bitcoind" -version | head -1
+      - name: End-to-end two-transport signing and Core acceptance
+        shell: bash
+        env:
+          CORE_BIN: ${{ runner.temp }}/bitcoin-31.1/bin
+          AIRSIGN: ${{ github.workspace }}/target/release/airsign
+          OUT: ${{ runner.temp }}/airsign-regtest-output
+        run: |
+          set -euo pipefail
+          bash scripts/e2e_regtest.sh
