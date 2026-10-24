@@ -5,7 +5,9 @@ on:
   workflow_dispatch:
   push:
     branches: ['security/**']
-    paths: ['.github/workflows/repro-forensics.yml']
+    paths:
+      - '.github/workflows/repro-forensics.yml'
+      - 'image/build-in-builder.sh'
 
 permissions:
   contents: read

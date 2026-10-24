@@ -107,6 +107,13 @@ rm -f "$ROOT"/etc/{passwd,group,shadow,gshadow,subuid,subgid}- \
       "$ROOT"/var/lib/dpkg/*-old "$ROOT"/var/lib/systemd/catalog/database \
       "$ROOT"/var/lib/dbus/machine-id \
       "$ROOT"/etc/nvme/hostid "$ROOT"/etc/nvme/hostnqn  # random NVMe-oF host IDs from nvme-cli's postinst; unused
+# Debootstrap copied the builder's /etc/resolv.conf into the guest root.
+# GitHub runners use different DNS servers, producing different SquashFS
+# contents and hence different dm-verity roots. The signer has no networking:
+# replace that host-specific file only after the package installation is done.
+rm -f "$ROOT/etc/resolv.conf"
+printf '# airsign offline image: no DNS resolver configured\n' > "$ROOT/etc/resolv.conf"
+chmod 0644 "$ROOT/etc/resolv.conf"
 # systemd creates a fresh machine-id at boot when this file is empty.
 : > "$ROOT/etc/machine-id"
 # Password-change dates are "days since 1970" taken from the clock unless the
