@@ -40,6 +40,16 @@ jobs:
           cp "$RUNNER_TEMP/airsign-out/"{SHA256SUMS,ROOTHASH,manifest.txt} "$RUNNER_TEMP/forensics/"
           sudo unsquashfs -no-progress -dest "$RUNNER_TEMP/airsign-root" \
             "$RUNNER_TEMP/airsign-out/filesystem.squashfs" >/dev/null
+          test "$(sudo stat -c '%u:%g:%a' "$RUNNER_TEMP/airsign-root/etc/usbguard/rules.conf")" = '0:0:600'
+          for sensitive_dir in \
+            "$RUNNER_TEMP/airsign-root/etc/systemd/system" \
+            "$RUNNER_TEMP/airsign-root/usr/local/lib/airsign"; do
+            if sudo find "$sensitive_dir" -not -uid 0 -print -quit | grep -q .; then
+              echo "Non-root-owned Airsign security policy/service detected under $sensitive_dir" >&2
+              exit 1
+            fi
+          done
+          echo "PASS: root-owned Airsign services and private USBGuard policy"
           (cd "$RUNNER_TEMP/airsign-root"
             sudo find . -type f -print0 | LC_ALL=C sort -z | sudo xargs -0 sha256sum \
               > "$RUNNER_TEMP/forensics/content-sha256.txt"

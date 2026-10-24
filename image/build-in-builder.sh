@@ -50,12 +50,20 @@ chroot "$ROOT" apt-get install -y -qq --no-install-recommends \
   util-linux nvme-cli hdparm \
   dmsetup libcryptsetup12 >/dev/null
 
-cp -a "$HERE/rootfs/." "$ROOT/"
+# The builder source checkout may be owned by the CI runner (UID 1001).
+# Never preserve that ownership in a privileged live image. A prior cp -a
+# installed rootfs/ overlay files as runner:runner, so root:root mode 0600
+# USBGuard policy became unreadable to the enforcing daemon.
+cp -a --no-preserve=ownership "$HERE/rootfs/." "$ROOT/"
 install -m 0755 "$BIN" "$ROOT/usr/local/bin/airsign"
 chmod 0755 "$ROOT"/usr/local/lib/airsign/*.sh \
   "$ROOT/etc/initramfs-tools/hooks/airsign-verity" \
   "$ROOT/etc/initramfs-tools/scripts/live-bottom/airsign-verity"
+# USBGuard's policy is intentionally private, owned and writable only by root.
+chown 0:0 "$ROOT/etc/usbguard/rules.conf"
 chmod 0600 "$ROOT/etc/usbguard/rules.conf"
+[ "$(stat -c '%u:%g:%a' "$ROOT/etc/usbguard/rules.conf")" = '0:0:600' ] ||
+  { echo "usbguard rule file ownership/mode is unsafe" >&2; exit 1; }
 sed -i 's/^PresentDevicePolicy=.*/PresentDevicePolicy=apply-policy/; s/^ImplicitPolicyTarget=.*/ImplicitPolicyTarget=block/' \
   "$ROOT/etc/usbguard/usbguard-daemon.conf"
 
