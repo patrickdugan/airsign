@@ -8,6 +8,8 @@ on:
     branches: ['security/**']
     paths:
       - '.github/workflows/image-candidate.yml'
+      - 'image/SHA256SUMS'
+      - 'image/ROOTHASH'
 
 permissions:
   contents: read
@@ -41,6 +43,14 @@ jobs:
           echo "candidate SHA256SUMS:"
           cat "$RUNNER_TEMP/airsign-image/SHA256SUMS"
           echo "CANDIDATE ONLY. Requires an independent second rebuild, fresh published hashes, signed QEMU tests and physical signet validation."
+      - name: Compare independent build against committed reference hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          diff -u image/ROOTHASH "$RUNNER_TEMP/airsign-image/ROOTHASH"
+          diff -u image/SHA256SUMS "$RUNNER_TEMP/airsign-image/SHA256SUMS"
+          (cd "$RUNNER_TEMP/airsign-image" && sha256sum --check "$GITHUB_WORKSPACE/image/SHA256SUMS")
+          echo "Candidate artifacts match the committed reference digests."
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: airsign-image-manifest-${{ github.sha }}
