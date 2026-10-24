@@ -15,6 +15,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Rust unit tests
         run: cargo +stable test --locked
+      - name: Dev-feature unit tests
+        run: cargo +stable test --locked --all-features
+      - name: Release-profile build
+        run: cargo +stable build --release --locked
       - name: Shell syntax
         run: |
           set -euo pipefail
