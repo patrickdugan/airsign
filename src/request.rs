@@ -561,6 +561,7 @@ mod signer_pipeline_regressions {
         conflict.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(200_001);
         assert!(SignRequest::from_psbt(wallet.secp(), &conflict, net).is_err());
         assert!(crate::combine::combine(&mut conflict, &signatures).is_err());
+        let original_psbt = imported.clone();
         let mut psbt_copy = imported.clone();
         let tx = crate::combine::combine(&mut psbt_copy, &signatures).unwrap();
         assert_eq!(tx.output, review.tx.output);
@@ -580,22 +581,25 @@ mod signer_pipeline_regressions {
 
         // An oversized request or signature return must fail on the online
         // coordinator before any secret is entered on the offline signer.
-        let mut too_many_inputs = psbt_copy.clone();
+        let mut too_many_inputs = original_psbt.clone();
         too_many_inputs.unsigned_tx.input = vec![
             too_many_inputs.unsigned_tx.input[0].clone(); MAX_INPUTS + 1
         ];
-        too_many_inputs.inputs = vec![psbt_copy.inputs[0].clone(); MAX_INPUTS + 1];
-        assert!(SignRequest::from_psbt(wallet.secp(), &too_many_inputs, net).is_err());
+        too_many_inputs.inputs = vec![original_psbt.inputs[0].clone(); MAX_INPUTS + 1];
+        let e = SignRequest::from_psbt(wallet.secp(), &too_many_inputs, net).unwrap_err();
+        assert!(e.0.contains("signature-frame limit"), "{e}");
 
-        let mut too_many_outputs = psbt_copy.clone();
+        let mut too_many_outputs = original_psbt.clone();
         too_many_outputs.unsigned_tx.output = vec![
             too_many_outputs.unsigned_tx.output[0].clone(); MAX_OUTPUTS + 1
         ];
-        too_many_outputs.outputs = vec![psbt_copy.outputs[0].clone(); MAX_OUTPUTS + 1];
-        assert!(SignRequest::from_psbt(wallet.secp(), &too_many_outputs, net).is_err());
+        too_many_outputs.outputs = vec![original_psbt.outputs[0].clone(); MAX_OUTPUTS + 1];
+        let e = SignRequest::from_psbt(wallet.secp(), &too_many_outputs, net).unwrap_err();
+        assert!(e.0.contains("output AS1 limit"), "{e}");
 
-        let mut giant_script = psbt_copy.clone();
+        let mut giant_script = original_psbt;
         giant_script.unsigned_tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x01; 4080]);
-        assert!(SignRequest::from_psbt(wallet.secp(), &giant_script, net).is_err());
+        let e = SignRequest::from_psbt(wallet.secp(), &giant_script, net).unwrap_err();
+        assert!(e.0.contains("4096 bytes"), "{e}");
     }
 }
