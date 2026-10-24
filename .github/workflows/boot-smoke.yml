@@ -14,6 +14,11 @@ on:
       - 'image/rootfs/**'
       - 'image/SHA256SUMS'
       - 'image/ROOTHASH'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'image/*.sh'
+      - 'image/snapshot.env'
 
 permissions:
   contents: read

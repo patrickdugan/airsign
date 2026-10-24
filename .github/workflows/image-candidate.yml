@@ -10,6 +10,11 @@ on:
       - '.github/workflows/image-candidate.yml'
       - 'image/SHA256SUMS'
       - 'image/ROOTHASH'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'image/*.sh'
+      - 'image/snapshot.env'
 
 permissions:
   contents: read

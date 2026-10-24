@@ -9,6 +9,11 @@ on:
       - '.github/workflows/repro-forensics.yml'
       - 'image/build-in-builder.sh'
       - 'image/rootfs/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'image/*.sh'
+      - 'image/snapshot.env'
 
 permissions:
   contents: read
