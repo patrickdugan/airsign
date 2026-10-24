@@ -11,6 +11,8 @@ on:
       - '.github/workflows/boot-smoke.yml'
       - 'image/test_qemu.py'
       - 'image/build-in-builder.sh'
+      - 'image/SHA256SUMS'
+      - 'image/ROOTHASH'
 
 permissions:
   contents: read
