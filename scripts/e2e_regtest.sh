@@ -57,11 +57,20 @@ run_case() {
   echo "--- case: $name"
   local PSBT
   PSBT=$(cli -rpcwallet=watch walletcreatefundedpsbt '[]' "$outputs" 0 '{"fee_rate":12}' | json 'd["psbt"]')
-  echo "$PSBT" > "$OUT/$name.psbt"
+  # Sparrow supports both Save PSBT > As Binary and As Base64. Exercise
+  # the identical two paths with a Core-generated PSBT fixture.
+  printf '%s\n' "$PSBT" > "$OUT/$name.psbt.base64"
+  printf '%s' "$PSBT" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read(), validate=True))' > "$OUT/$name.psbt"
 
   # 3. Online: compress the PSBT into a signing request.
   "$AIRSIGN" request --network regtest --psbt "$PSBT" 2>/dev/null > "$OUT/$name.request.txt"
   local REQ; REQ=$(tail -1 "$OUT/$name.request.txt")
+  local REQ_BIN REQ_B64 REQ_STDIN
+  REQ_BIN=$("$AIRSIGN" request --network regtest --psbt @"$OUT/$name.psbt" --format as1 2>/dev/null)
+  REQ_B64=$("$AIRSIGN" request --network regtest --psbt @"$OUT/$name.psbt.base64" --format as1 2>/dev/null)
+  REQ_STDIN=$(cat "$OUT/$name.psbt" | "$AIRSIGN" request --network regtest --psbt - --format as1 2>/dev/null)
+  [ "$REQ" = "$REQ_BIN" ] && [ "$REQ" = "$REQ_B64" ] && [ "$REQ" = "$REQ_STDIN" ] \
+    && pass "binary, Base64 and stdin PSBTs yield the same signing request" || die "PSBT transport mismatch"
   "$AIRSIGN" show "$REQ" --format words > "$OUT/$name.request_words.txt"
   "$AIRSIGN" show "$REQ" --format minimal > "$OUT/$name.request_minimal.txt"
 
@@ -80,6 +89,15 @@ run_case() {
 
   # 6. Online: combine from the hand-typed word form.
   "$AIRSIGN" combine --psbt "$PSBT" --signatures @"$OUT/$name.signatures_words.txt" 2>/dev/null > "$DD/tx.hex"
+  "$AIRSIGN" combine --psbt @"$OUT/$name.psbt" --signatures @"$OUT/$name.signatures_words.txt" \
+    --psbt-out "$OUT/$name.signed.psbt" --psbt-out-format binary 2>/dev/null > "$DD/tx.binary.hex"
+  cmp -s "$DD/tx.hex" "$DD/tx.binary.hex" || die "binary and Base64 combining differs"
+  python3 - "$OUT/$name.signed.psbt" <<'PY'
+import sys
+with open(sys.argv[1], "rb") as f:
+    assert f.read(5) == b"psbt\\xff", "signed PSBT must use binary PSBT magic"
+PY
+  pass "signed PSBT exported as binary file with identical transaction"
   cli testmempoolaccept "[\"$(cat "$DD/tx.hex")\"]" | json 'd[0]["allowed"]' | grep -q True \
     && pass "Core testmempoolaccept: allowed" || { cli testmempoolaccept "[\"$(cat "$DD/tx.hex")\"]"; die "mempool"; }
 
