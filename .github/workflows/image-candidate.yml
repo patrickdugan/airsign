@@ -1,0 +1,52 @@
+# Candidate image build only. This job neither signs images nor certifies a
+# release. Signed hardware tests and independent reproducibility remain gates.
+name: Build Airsign candidate image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['security/**']
+    paths:
+      - '.github/workflows/image-candidate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Prepare the ephemeral Linux builder
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends debootstrap debian-archive-keyring
+      - name: Rebuild from the exact checked-out commit and pinned snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env WORK="$RUNNER_TEMP/airsign-repro" \
+            bash image/build.sh "$RUNNER_TEMP/airsign-image"
+      - name: Print candidate manifest and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$RUNNER_TEMP/airsign-image/manifest.txt"
+          test -s "$RUNNER_TEMP/airsign-image/SHA256SUMS"
+          test -s "$RUNNER_TEMP/airsign-image/ROOTHASH"
+          grep '^commit ' "$RUNNER_TEMP/airsign-image/manifest.txt"
+          echo "candidate ROOTHASH:"
+          cat "$RUNNER_TEMP/airsign-image/ROOTHASH"
+          echo "candidate SHA256SUMS:"
+          cat "$RUNNER_TEMP/airsign-image/SHA256SUMS"
+          echo "CANDIDATE ONLY. Requires an independent second rebuild, fresh published hashes, signed QEMU tests and physical signet validation."
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: airsign-image-manifest-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/airsign-image/SHA256SUMS
+            ${{ runner.temp }}/airsign-image/ROOTHASH
+            ${{ runner.temp }}/airsign-image/manifest.txt
+          retention-days: 14
+          if-no-files-found: error
