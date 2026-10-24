@@ -36,6 +36,13 @@ class FailClosed(unittest.TestCase):
         self.cmdline.write_text("boot=live toram test=1\n")
         self.modules = self.proc / "modules"
         self.modules.write_text("")
+        self.root_hash = "ab" * 32
+        self.efi = self.d / "SecureBoot"
+        self.efi.write_bytes(b"\x00" * 4 + b"\x01")
+        self.mounts = self.proc / "mounts"
+        self.mounts.write_text(
+            "/dev/mapper/airsign /run/live/medium/live/filesystem.squashfs squashfs ro 0 0\n"
+        )
         self.block = self.sys / "block"
         self.block.mkdir()
         for name in ("loop0", "dm-0"):
@@ -62,6 +69,15 @@ esac
 """)
         self.mock("modprobe", "#!/bin/sh\nexit 0\n")
         self.mock("sleep", "#!/bin/sh\nexit 0\n")
+        self.mock("dmsetup", """#!/bin/sh
+[ "$1" = table ] || exit 1
+[ "${TEST_DM_FAIL:-0}" = 0 ] || exit 1
+if [ "${TEST_DM_BAD_TABLE:-0}" = 1 ]; then
+  printf '0 100 linear 1 dev 0 0 0 0 0 sha256 %s abcd\\n' "$TEST_DM_ROOT"
+else
+  printf '0 100 verity 1 /dev/loop0 /dev/loop1 4096 4096 10 0 sha256 %s abcd\\n' "$TEST_DM_ROOT"
+fi
+""")
 
         self.env = dict(os.environ)
         self.env.update(
@@ -70,6 +86,9 @@ esac
             TEST_FSTYPE="tmpfs",
             TEST_UDEV_FAIL="0",
             TEST_GUARD_STATE="active",
+            TEST_DM_FAIL="0",
+            TEST_DM_BAD_TABLE="0",
+            TEST_DM_ROOT=self.root_hash,
         )
 
     def mock(self, name, source):
@@ -91,6 +110,13 @@ esac
                 "/sys/block": str(self.block),
                 "/sys/bus/usb/drivers": str(self.sys / "bus/usb/drivers"),
             }
+        elif name == "verify-boot.sh":
+            replacements = {
+                "/proc/cmdline": str(self.cmdline),
+                "/proc/mounts": str(self.mounts),
+                "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c": str(self.efi),
+                "/sys/block/": str(self.sys / "block") + "/",
+            }
         else:
             raise AssertionError("unexpected script")
         for old, new in replacements.items():
@@ -103,7 +129,7 @@ esac
     def run_script(self, name):
         p = self.isolated_script(name)
         return subprocess.run(
-            ["bash", str(p)], env=self.env, text=True,
+            ["sh" if name == "verify-boot.sh" else "bash", str(p)], env=self.env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=8, check=False,
         )
@@ -176,6 +202,67 @@ esac
         p = self.run_script("unload-storage.sh")
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("USBGuard is not active", p.stderr)
+
+    def valid_verity_boot(self):
+        self.cmdline.write_text(
+            "boot=live toram dm-verity-root-hash=filesystem.squashfs:"
+            + self.root_hash + "\n"
+        )
+
+    def test_verified_boot_accepts_known_consistent_state(self):
+        self.valid_verity_boot()
+        p = self.run_script("verify-boot.sh")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertIn("Secure Boot and dm-verity verified", p.stdout)
+
+    def test_verified_boot_rejects_disabled_secure_boot(self):
+        self.valid_verity_boot()
+        self.efi.write_bytes(b"\x00" * 4 + b"\x00")
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Secure Boot is OFF", p.stderr)
+
+    def test_verified_boot_rejects_missing_efi_state(self):
+        self.valid_verity_boot()
+        self.efi.unlink()
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("EFI state unavailable", p.stderr)
+
+    def test_verified_boot_rejects_missing_cmdline_root(self):
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("missing or malformed verity root hash", p.stderr)
+
+    def test_verified_boot_rejects_mismatched_root(self):
+        self.valid_verity_boot()
+        self.env["TEST_DM_ROOT"] = "cd" * 32
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("verity hash differs", p.stderr)
+
+    def test_verified_boot_rejects_nonverity_device(self):
+        self.valid_verity_boot()
+        self.env["TEST_DM_BAD_TABLE"] = "1"
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("not dm-verity protected", p.stderr)
+
+    def test_verified_boot_rejects_dmsetup_failure(self):
+        self.valid_verity_boot()
+        self.env["TEST_DM_FAIL"] = "1"
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("cannot read device-mapper table", p.stderr)
+
+    def test_verified_boot_rejects_direct_unverified_mount(self):
+        self.valid_verity_boot()
+        self.mounts.write_text(
+            "/dev/loop0 /run/live/medium/live/filesystem.squashfs squashfs ro 0 0\n"
+        )
+        p = self.run_script("verify-boot.sh")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("root image mounted directly", p.stderr)
 
     def test_signer_unit_requires_guards(self):
         d = ROOT / "image/rootfs/etc/systemd/system"
