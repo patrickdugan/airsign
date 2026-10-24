@@ -11,6 +11,7 @@ on:
       - '.github/workflows/boot-smoke.yml'
       - 'image/test_qemu.py'
       - 'image/build-in-builder.sh'
+      - 'image/rootfs/**'
       - 'image/SHA256SUMS'
       - 'image/ROOTHASH'
 

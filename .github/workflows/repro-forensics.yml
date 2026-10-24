@@ -8,6 +8,7 @@ on:
     paths:
       - '.github/workflows/repro-forensics.yml'
       - 'image/build-in-builder.sh'
+      - 'image/rootfs/**'
 
 permissions:
   contents: read

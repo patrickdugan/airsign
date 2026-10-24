@@ -19,6 +19,8 @@ jobs:
         run: cargo +stable test --locked --all-features
       - name: Release-profile build
         run: cargo +stable build --release --locked
+      - name: Fail-closed isolation fault injection
+        run: python3 scripts/test_fail_closed.py
       - name: Shell syntax
         run: |
           set -euo pipefail
