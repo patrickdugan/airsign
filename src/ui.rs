@@ -515,7 +515,7 @@ mod security_tests {
 
     #[test]
     fn review_pages_preserve_every_character_and_bound_visible_rows() {
-        let long_script = "a".repeat(501);
+        let long_script = "a".repeat(1200);
         let summary = vec!["wallet header".to_owned(), long_script.clone(), "fee".to_owned()];
         let warnings = vec!["unsafe output".to_owned(), "b".repeat(190)];
         let pages = review_pages(&summary, &warnings);
