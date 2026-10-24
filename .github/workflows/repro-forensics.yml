@@ -1,0 +1,92 @@
+# Investigate reproducibility only; never sign candidate images.
+name: Diagnose Airsign SquashFS reproducibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['security/**']
+    paths: ['.github/workflows/repro-forensics.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  rebuild:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [a, b]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install builder and SquashFS inspectors
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends debootstrap debian-archive-keyring squashfs-tools
+      - name: Independent candidate build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env WORK="$RUNNER_TEMP/airsign-builder-${{ matrix.runner }}" \
+            bash image/build.sh "$RUNNER_TEMP/airsign-out"
+      - name: Inspect unpacked system filesystem
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/forensics"
+          cp "$RUNNER_TEMP/airsign-out/"{SHA256SUMS,ROOTHASH,manifest.txt} "$RUNNER_TEMP/forensics/"
+          sudo unsquashfs -no-progress -dest "$RUNNER_TEMP/airsign-root" \
+            "$RUNNER_TEMP/airsign-out/filesystem.squashfs" >/dev/null
+          (cd "$RUNNER_TEMP/airsign-root"
+            sudo find . -type f -print0 | LC_ALL=C sort -z | sudo xargs -0 sha256sum \
+              > "$RUNNER_TEMP/forensics/content-sha256.txt"
+            sudo find . -printf '%y|%m|%u|%g|%s|%p|%l\n' | LC_ALL=C sort \
+              > "$RUNNER_TEMP/forensics/metadata.txt"
+          )
+          unsquashfs -lln "$RUNNER_TEMP/airsign-out/filesystem.squashfs" \
+            | LC_ALL=C sort > "$RUNNER_TEMP/forensics/unsquashfs.txt"
+          echo "runner ${{ matrix.runner }} root:"
+          cat "$RUNNER_TEMP/airsign-out/ROOTHASH"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: squashfs-repro-${{ matrix.runner }}
+          path: ${{ runner.temp }}/forensics/
+          retention-days: 7
+          if-no-files-found: error
+
+  compare:
+    needs: rebuild
+    if: ${{ always() && needs.rebuild.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: squashfs-repro-*
+          path: forensics
+      - name: Compare content hashes, metadata and published artifact digests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from difflib import unified_diff
+          from sys import exit
+          a, b = Path('forensics/squashfs-repro-a'), Path('forensics/squashfs-repro-b')
+          names = ['ROOTHASH', 'SHA256SUMS', 'content-sha256.txt', 'metadata.txt', 'unsquashfs.txt']
+          errors = 0
+          for name in names:
+              aa, bb = (a / name).read_text().splitlines(), (b / name).read_text().splitlines()
+              if aa == bb:
+                  print(f'IDENTICAL {name} ({len(aa)} lines)', flush=True)
+                  continue
+              errors += 1
+              print(f'DIFFERENT {name}: {len(aa)} vs {len(bb)} lines', flush=True)
+              changes = list(unified_diff(aa, bb, fromfile='builder A/'+name, tofile='builder B/'+name, n=0))
+              print('\n'.join(changes[:110]), flush=True)
+              if len(changes) > 110:
+                  print(f'... {len(changes)-110} additional diff lines', flush=True)
+          if errors:
+              print(f'REPRO FAILURE: {errors} manifests differ. Investigate before image signing.', flush=True)
+              exit(1)
+          print('BOTH BUILDERS REPRODUCED EXACTLY', flush=True)
+          PY
