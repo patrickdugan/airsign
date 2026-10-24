@@ -20,7 +20,9 @@ owner key custody are prerequisites, not substitutes for inspecting the source.
 Only AS1 QR data or checked word transcripts cross the air gap. The full PSBT
 stays online; it is decoded and compressed there. Every recipient, amount,
 change derivation and fee must be checked on the independent offline screen
-before the operator types `sign`.
+before the operator types `sign`. Long reviews are split into bounded pages
+and require explicit `next` acknowledgment before the final signing prompt;
+outputs or warnings must never be silently scrolled off the console.
 
 ### Limitations and residual threats
 

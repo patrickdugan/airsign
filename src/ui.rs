@@ -263,6 +263,71 @@ pub fn show_frame(frame: &[u8], title: &str) {
     }
 }
 
+// A text console has limited visible rows. Untrusted transactions can contain
+// hundreds of outputs, and a long script or warning can span many terminal
+// lines. Never let the operator sign after a single scrolling text dump.
+const REVIEW_COLUMNS: usize = 72;
+const REVIEW_ROWS: usize = 14;
+
+fn wrap_review_line(line: &str) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chars = line.chars();
+    let mut rows = Vec::new();
+    loop {
+        let row: String = chars.by_ref().take(REVIEW_COLUMNS).collect();
+        if row.is_empty() {
+            break;
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+fn review_pages(summary: &[String], warnings: &[String]) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for line in summary {
+        rows.extend(wrap_review_line(line));
+    }
+    if !warnings.is_empty() {
+        rows.push(String::new());
+        for warning in warnings {
+            rows.extend(wrap_review_line(&format!("WARNING: {warning}")));
+        }
+    }
+    rows.chunks(REVIEW_ROWS).map(|page| page.to_vec()).collect()
+}
+
+fn confirm_review(rv: &signer::Review) -> bool {
+    let pages = review_pages(&rv.summary, &rv.warnings);
+    if pages.is_empty() {
+        return false;
+    }
+    for (n, page) in pages.iter().enumerate() {
+        clear();
+        println!("TRANSACTION REVIEW — page {} of {}\n", n + 1, pages.len());
+        for line in page {
+            println!("{line}");
+        }
+        if n + 1 < pages.len() {
+            if prompt("\nType 'next' to inspect more details; anything else cancels: ") != "next" {
+                return false;
+            }
+        } else {
+            println!(
+                "\nEnd of review: {} outputs, fee {} BTC, {} warnings",
+                rv.tx.output.len(), signer::btc(rv.fee), rv.warnings.len()
+            );
+            let need = if rv.warnings.is_empty() { "sign" } else { "sign anyway" };
+            if prompt(&format!("Type '{need}' to sign, anything else to cancel: ")) != need {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn sign_flow(s: &Session) -> Result<(), CodecError> {
     let Some(wallet) = load_wallet(s) else { return Ok(()) };
     loop {
@@ -281,21 +346,7 @@ fn sign_flow(s: &Session) -> Result<(), CodecError> {
                 return Ok(());
             }
         };
-        clear();
-        println!("Check every line against the online computer and your own intent:\n");
-        for l in &rv.summary {
-            println!("{l}");
-        }
-        if !rv.warnings.is_empty() {
-            println!();
-            for w in &rv.warnings {
-                println!("  WARNING: {w}");
-            }
-        }
-        let need = if rv.warnings.is_empty() { "sign" } else { "sign anyway" };
-        println!();
-        let a = prompt(&format!("Type '{need}' to sign, anything else to cancel: "));
-        if a != need {
+        if !confirm_review(&rv) {
             println!("Not signed.");
             pause("[Enter] ");
             return Ok(());
@@ -461,6 +512,26 @@ pub fn menu(s: &Session) -> i32 {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn review_pages_preserve_every_character_and_bound_visible_rows() {
+        let long_script = "a".repeat(501);
+        let summary = vec!["wallet header".to_owned(), long_script.clone(), "fee".to_owned()];
+        let warnings = vec!["unsafe output".to_owned(), "b".repeat(190)];
+        let pages = review_pages(&summary, &warnings);
+        assert!(pages.len() >= 2, "long scripts must not be one scrolling screen");
+        assert!(pages.iter().all(|p| p.len() <= REVIEW_ROWS));
+        let lines: Vec<_> = pages.iter().flatten().collect();
+        assert!(lines.iter().all(|line| line.chars().count() <= REVIEW_COLUMNS));
+        let script_rows = long_script.len().div_ceil(REVIEW_COLUMNS);
+        let reconstructed: String = lines[1..=script_rows].iter().map(|r| r.as_str()).collect();
+        assert_eq!(reconstructed, long_script);
+        assert!(lines.iter().any(|r| r.starts_with("WARNING: unsafe output")));
+        assert_eq!(lines.iter().map(|s| s.len()).sum::<usize>(),
+            summary.iter().map(|s| s.len()).sum::<usize>() +
+            warnings.iter().map(|s| format!("WARNING: {s}").len()).sum::<usize>());
+    }
+
 
     #[test]
     fn every_backup_word_must_match() {
