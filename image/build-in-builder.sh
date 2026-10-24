@@ -171,6 +171,11 @@ bash "$HERE/make-iso.sh" "$ISO" "$WORK/esp" "$OUT/airsign-live.iso"
 # --- 8. what was built, from what ------------------------------------------------------------
 cp "$BIN" "$OUT/airsign"
 cp "$ISO/live/filesystem.squashfs" "$ISO/live/filesystem.squashfs.verity" "$OUT/"
+# veritysetup creates the detached hash tree mode 0600. The built artifact
+# has no secrets and must be readable by the unprivileged release verifier
+# and the machine that runs image/sign.sh. File-mode change leaves its SHA256
+# and the deterministic ISO payload unchanged.
+chmod 0644 "$OUT/filesystem.squashfs.verity"
 cp "$ROOT/boot/vmlinuz-$KVER" "$OUT/vmlinuz"
 cp "$ROOT/boot/initrd.img-$KVER" "$OUT/initrd.img"
 echo "$ROOTHASH" > "$OUT/ROOTHASH"
