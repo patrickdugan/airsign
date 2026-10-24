@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs before USBGuard. The session is only amnesic if the whole system lives in
 # RAM: once USBGuard refuses the boot stick, nothing may still be reading it.
-set -u
+set -euo pipefail
 
 say() {
   echo "airsign-lockdown: $*"
@@ -31,7 +31,10 @@ install uas /bin/false
 EOF
 # udevd caches the modprobe configuration; make it pick up the block above, or
 # it would reload the drivers for the next storage device it sees.
-udevadm control --reload 2>/dev/null || true
+if ! udevadm control --reload >/dev/null 2>&1; then
+  say "udev did not reload the USB-storage block policy; refusing to start."
+  exit 1
+fi
 # The drivers themselves are unloaded by unload-storage.sh, after USBGuard has
 # refused the boot stick: until then the stick is authorized and udev would
 # simply probe it again.

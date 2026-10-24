@@ -9,7 +9,16 @@ for _ in $(seq 1 60); do
     [ -e "$intf" ] && echo "${intf##*/}" > "${intf%/*}/unbind" 2>/dev/null
   done
   modprobe -r uas usb_storage 2>/dev/null
-  grep -qE '^(usb_storage|uas) ' /proc/modules || exit 0
+  if grep -qE '^(usb_storage|uas) ' /proc/modules; then
+    : # One or both modules are still resident. Retry after unbind.
+  else
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      exit 0
+    fi
+    echo "airsign-unload-storage: cannot read /proc/modules; refusing signing session" >&2
+    exit 1
+  fi
   sleep 0.5
 done
 echo "airsign-unload-storage: USB storage driver still loaded after 30 s; refusing signing session" >&2

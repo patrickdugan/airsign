@@ -72,8 +72,9 @@ impl Wallet {
     }
 
     pub fn account_export(&self, network: Network, account: u32) -> Account {
-        let x = self.account_xpriv(network, account);
+        let mut x = self.account_xpriv(network, account);
         let xpub = Xpub::from_priv(&self.secp, &x);
+        x.private_key.non_secure_erase();
         Account {
             network,
             master_fp: self.fp,
@@ -89,8 +90,12 @@ impl Wallet {
             ChildNumber::from_normal_idx(path.change as u32).unwrap(),
             ChildNumber::from_normal_idx(path.index).expect("index < 2^31"),
         ];
-        let x = self.account_xpriv(network, account).derive_priv(&self.secp, &tail).expect("derivation");
-        Keypair::from_secret_key(&self.secp, &x.private_key)
+        let mut account_key = self.account_xpriv(network, account);
+        let mut child = account_key.derive_priv(&self.secp, &tail).expect("derivation");
+        account_key.private_key.non_secure_erase();
+        let pair = Keypair::from_secret_key(&self.secp, &child.private_key);
+        child.private_key.non_secure_erase();
+        pair
     }
 
     pub fn internal_key(&self, network: Network, account: u32, path: KeyPath) -> XOnlyPublicKey {
