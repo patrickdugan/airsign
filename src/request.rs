@@ -26,7 +26,9 @@ use bitcoin::{Network, OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Txid};
 use crate::codec::{err, put_uleb, CodecError, Reader};
 use crate::frame::{coin_type, expect, net_code, net_from_code, seal, Kind};
 
-pub const MAX_INPUTS: usize = 250;
+// Every input yields a 64-byte Schnorr signature; the return frame is
+// header(1) + 64 * inputs, bounded by MAX_FRAME.
+pub const MAX_INPUTS: usize = (crate::frame::MAX_FRAME - 1) / 64;
 pub const MAX_OUTPUTS: usize = 250;
 pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
 const MAX_RAW_SCRIPT: usize = 10_000;
@@ -288,6 +290,15 @@ impl SignRequest {
         if tx.input.is_empty() || tx.output.is_empty() {
             return err("PSBT has no inputs or no outputs");
         }
+        if tx.input.len() > MAX_INPUTS {
+            return err(format!("{} inputs exceed the {}-input AS1 signature-frame limit", tx.input.len(), MAX_INPUTS));
+        }
+        if tx.output.len() > MAX_OUTPUTS {
+            return err(format!("{} outputs exceed the {}-output AS1 limit", tx.output.len(), MAX_OUTPUTS));
+        }
+        if psbt.inputs.len() != tx.input.len() || psbt.outputs.len() != tx.output.len() {
+            return err("PSBT metadata count does not match transaction inputs/outputs");
+        }
         let sequence = tx.input[0].sequence.0;
         if tx.input.iter().any(|i| i.sequence != Sequence(sequence)) {
             return err("inputs use different nSequence values; airsign v1 needs them equal");
@@ -341,7 +352,7 @@ impl SignRequest {
             }
             outputs.push(ReqOutput { dest, amount: txout.value.to_sat() });
         }
-        Ok(SignRequest {
+        let request = SignRequest {
             network,
             master_fp,
             account,
@@ -350,7 +361,11 @@ impl SignRequest {
             sequence,
             inputs,
             outputs,
-        })
+        };
+        if request.encode().len() > crate::frame::MAX_FRAME {
+            return err("AS1 request exceeds 4096 bytes; consolidate inputs or use fewer outputs");
+        }
+        Ok(request)
     }
 }
 
@@ -562,5 +577,25 @@ mod signer_pipeline_regressions {
         unlabeled.outputs[1].tap_key_origins.clear();
         let changed = SignRequest::from_psbt(wallet.secp(), &unlabeled, net).unwrap();
         assert!(matches!(changed.outputs[1].dest, Dest::Script(_)));
+
+        // An oversized request or signature return must fail on the online
+        // coordinator before any secret is entered on the offline signer.
+        let mut too_many_inputs = psbt_copy.clone();
+        too_many_inputs.unsigned_tx.input = vec![
+            too_many_inputs.unsigned_tx.input[0].clone(); MAX_INPUTS + 1
+        ];
+        too_many_inputs.inputs = vec![psbt_copy.inputs[0].clone(); MAX_INPUTS + 1];
+        assert!(SignRequest::from_psbt(wallet.secp(), &too_many_inputs, net).is_err());
+
+        let mut too_many_outputs = psbt_copy.clone();
+        too_many_outputs.unsigned_tx.output = vec![
+            too_many_outputs.unsigned_tx.output[0].clone(); MAX_OUTPUTS + 1
+        ];
+        too_many_outputs.outputs = vec![psbt_copy.outputs[0].clone(); MAX_OUTPUTS + 1];
+        assert!(SignRequest::from_psbt(wallet.secp(), &too_many_outputs, net).is_err());
+
+        let mut giant_script = psbt_copy.clone();
+        giant_script.unsigned_tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x01; 4080]);
+        assert!(SignRequest::from_psbt(wallet.secp(), &giant_script, net).is_err());
     }
 }
