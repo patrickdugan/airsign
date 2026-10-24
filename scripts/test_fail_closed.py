@@ -148,7 +148,8 @@ esac
         self.modules.unlink()
         p = self.run_script("unload-storage.sh")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("cannot read /proc/modules", p.stderr)
+        self.assertIn("cannot read", p.stderr)
+        self.assertIn("refusing signing session", p.stderr)
 
     def test_unload_unexpected_usb_disk_refuses(self):
         (self.block / "sda").mkdir()
@@ -168,7 +169,7 @@ esac
         self.block.rmdir()
         p = self.run_script("unload-storage.sh")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("/sys/block unavailable", p.stderr)
+        self.assertIn("unavailable; refusing signing session", p.stderr)
 
     def test_unload_inactive_usbguard_refuses(self):
         self.env["TEST_GUARD_STATE"] = "inactive"
