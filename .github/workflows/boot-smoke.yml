@@ -1,0 +1,104 @@
+# Virtual hardware proof-of-boot smoke test. Test owner/attacker Secure Boot
+# keys are generated in this ephemeral runner, never used for real wallets.
+# This workflow cannot approve a release or substitute for physical hardware.
+name: Airsign QEMU Secure Boot smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['security/**']
+    paths:
+      - '.github/workflows/boot-smoke.yml'
+      - 'image/test_qemu.py'
+      - 'image/build-in-builder.sh'
+      - 'image/rootfs/**'
+      - 'image/SHA256SUMS'
+      - 'image/ROOTHASH'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'image/*.sh'
+      - 'image/snapshot.env'
+
+permissions:
+  contents: read
+
+jobs:
+  verified-boot-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned-builder and QEMU test dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            debootstrap debian-archive-keyring qemu-system-x86 ovmf \
+            python3-virt-firmware zbar-tools xorriso efitools \
+            sbsigntool python3-pefile mtools dosfstools faketime
+          command -v virt-fw-vars
+          command -v qemu-system-x86_64
+          test -f /usr/share/OVMF/OVMF_CODE_4M.secboot.fd
+          test -f /usr/share/OVMF/OVMF_VARS_4M.fd
+      - name: Build unsigned image from this exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env WORK="$RUNNER_TEMP/airsign-smoke-builder" \
+            bash image/build.sh "$RUNNER_TEMP/airsign-smoke-image"
+      - name: Refuse to boot if reference hashes differ
+        shell: bash
+        run: |
+          set -euo pipefail
+          diff -u image/ROOTHASH "$RUNNER_TEMP/airsign-smoke-image/ROOTHASH"
+          diff -u image/SHA256SUMS "$RUNNER_TEMP/airsign-smoke-image/SHA256SUMS"
+          (cd "$RUNNER_TEMP/airsign-smoke-image"
+            sha256sum --check "$GITHUB_WORKSPACE/image/SHA256SUMS")
+          grep -Fx "commit   $GITHUB_SHA" "$RUNNER_TEMP/airsign-smoke-image/manifest.txt"
+      - name: Generate disposable test-only owner and attacker firmware keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/airsign-smoke-keys"
+          bash image/keys.sh "$RUNNER_TEMP/airsign-smoke-keys/owner" "Airsign CI test owner"
+          bash image/keys.sh "$RUNNER_TEMP/airsign-smoke-keys/attacker" "Airsign CI test attacker"
+      - name: Boot signed self-test and unsigned diagnostic under SMM OVMF
+        shell: bash
+        env:
+          OVMF_SMM: '1'
+          QEMU_ACCEL: tcg
+        run: |
+          set -euo pipefail
+          python3 image/test_qemu.py \
+            "$RUNNER_TEMP/airsign-smoke-image" \
+            "$RUNNER_TEMP/airsign-smoke-keys" \
+            "$RUNNER_TEMP/airsign-smoke-results" SU
+      - name: Test live signing, disposable disk wipe, tampering and Secure Boot refusal
+        shell: bash
+        env:
+          OVMF_SMM: '1'
+          QEMU_ACCEL: tcg
+          AIRSIGN: ${{ github.workspace }}/target/release/airsign
+        run: |
+          set -euo pipefail
+          # No real wallet keys or real disks: the harness uses disposable
+          # QEMU images, known BIP39 test vectors, and ephemeral firmware keys.
+          cargo +stable build --release --locked
+          python3 image/test_qemu.py \
+            "$RUNNER_TEMP/airsign-smoke-image" \
+            "$RUNNER_TEMP/airsign-smoke-keys" \
+            "$RUNNER_TEMP/airsign-adversarial-results" IWTFK
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: airsign-qemu-smoke-diagnostics-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/airsign-smoke-results/*.serial.log
+            ${{ runner.temp }}/airsign-smoke-results/*.png
+            ${{ runner.temp }}/airsign-smoke-results/*.qemu.log
+            ${{ runner.temp }}/airsign-adversarial-results/*.serial.log
+            ${{ runner.temp }}/airsign-adversarial-results/*.png
+            ${{ runner.temp }}/airsign-adversarial-results/*.qemu.log
+          retention-days: 7
+          if-no-files-found: ignore

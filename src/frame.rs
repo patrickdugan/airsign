@@ -127,8 +127,13 @@ pub fn to_qr_string(frame: &[u8]) -> String {
 
 /// Accept either a QR/base-32 string ("AS1...") or a word transcript.
 pub fn parse_text(text: &str) -> Result<Vec<u8>, CodecError> {
+    // Bound untrusted QR or typed inputs before allocating a compact copy.
+    if text.len() > MAX_FRAME * 16 {
+        return err("frame text exceeds the maximum length");
+    }
     let compact: String = text.split_whitespace().collect();
-    if compact.len() > 3 && compact[..3].eq_ignore_ascii_case(QR_PREFIX) {
+    // A Unicode prefix must yield a parse error, never a byte-boundary panic.
+    if compact.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case(QR_PREFIX)) {
         return b32_decode(&compact[3..]);
     }
     codec::parse_transcript(text)
@@ -295,6 +300,14 @@ mod tests {
             g[i] ^= 0x10;
             assert!(open(&g).is_err(), "byte {i}");
         }
+    }
+
+    #[test]
+    fn malformed_unicode_and_oversize_frames_are_rejected() {
+        for text in ["éAS1QQ", "🙂AS1QQ", "ASé", "𐀀"] {
+            assert!(parse_text(text).is_err(), "{text}");
+        }
+        assert!(parse_text(&"A".repeat(MAX_FRAME * 16 + 1)).is_err());
     }
 
     #[test]

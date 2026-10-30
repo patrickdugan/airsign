@@ -50,12 +50,20 @@ chroot "$ROOT" apt-get install -y -qq --no-install-recommends \
   util-linux nvme-cli hdparm \
   dmsetup libcryptsetup12 >/dev/null
 
-cp -a "$HERE/rootfs/." "$ROOT/"
+# The builder source checkout may be owned by the CI runner (UID 1001).
+# Never preserve that ownership in a privileged live image. A prior cp -a
+# installed rootfs/ overlay files as runner:runner, so root:root mode 0600
+# USBGuard policy became unreadable to the enforcing daemon.
+cp -a --no-preserve=ownership "$HERE/rootfs/." "$ROOT/"
 install -m 0755 "$BIN" "$ROOT/usr/local/bin/airsign"
 chmod 0755 "$ROOT"/usr/local/lib/airsign/*.sh \
   "$ROOT/etc/initramfs-tools/hooks/airsign-verity" \
   "$ROOT/etc/initramfs-tools/scripts/live-bottom/airsign-verity"
+# USBGuard's policy is intentionally private, owned and writable only by root.
+chown 0:0 "$ROOT/etc/usbguard/rules.conf"
 chmod 0600 "$ROOT/etc/usbguard/rules.conf"
+[ "$(stat -c '%u:%g:%a' "$ROOT/etc/usbguard/rules.conf")" = '0:0:600' ] ||
+  { echo "usbguard rule file ownership/mode is unsafe" >&2; exit 1; }
 sed -i 's/^PresentDevicePolicy=.*/PresentDevicePolicy=apply-policy/; s/^ImplicitPolicyTarget=.*/ImplicitPolicyTarget=block/' \
   "$ROOT/etc/usbguard/usbguard-daemon.conf"
 
@@ -63,7 +71,7 @@ sed -i 's/^PresentDevicePolicy=.*/PresentDevicePolicy=apply-policy/; s/^Implicit
 chroot "$ROOT" useradd --system --no-create-home --shell /usr/sbin/nologin --groups video signer
 chroot "$ROOT" passwd -l root >/dev/null
 
-chroot "$ROOT" systemctl enable airsign.service airsign-lockdown.service airsign-unload-storage.service \
+chroot "$ROOT" systemctl enable airsign.service airsign-lockdown.service airsign-verify-boot.service airsign-unload-storage.service \
   airsign-selftest.service airsign-wipe.service usbguard.service >/dev/null 2>&1
 chroot "$ROOT" systemctl set-default multi-user.target >/dev/null 2>&1
 # Nothing to log in to: no gettys on any virtual terminal.
@@ -107,6 +115,13 @@ rm -f "$ROOT"/etc/{passwd,group,shadow,gshadow,subuid,subgid}- \
       "$ROOT"/var/lib/dpkg/*-old "$ROOT"/var/lib/systemd/catalog/database \
       "$ROOT"/var/lib/dbus/machine-id \
       "$ROOT"/etc/nvme/hostid "$ROOT"/etc/nvme/hostnqn  # random NVMe-oF host IDs from nvme-cli's postinst; unused
+# Debootstrap copied the builder's /etc/resolv.conf into the guest root.
+# GitHub runners use different DNS servers, producing different SquashFS
+# contents and hence different dm-verity roots. The signer has no networking:
+# replace that host-specific file only after the package installation is done.
+rm -f "$ROOT/etc/resolv.conf"
+printf '# airsign offline image: no DNS resolver configured\n' > "$ROOT/etc/resolv.conf"
+chmod 0644 "$ROOT/etc/resolv.conf"
 # systemd creates a fresh machine-id at boot when this file is empty.
 : > "$ROOT/etc/machine-id"
 # Password-change dates are "days since 1970" taken from the clock unless the
@@ -164,6 +179,11 @@ bash "$HERE/make-iso.sh" "$ISO" "$WORK/esp" "$OUT/airsign-live.iso"
 # --- 8. what was built, from what ------------------------------------------------------------
 cp "$BIN" "$OUT/airsign"
 cp "$ISO/live/filesystem.squashfs" "$ISO/live/filesystem.squashfs.verity" "$OUT/"
+# veritysetup creates the detached hash tree mode 0600. The built artifact
+# has no secrets and must be readable by the unprivileged release verifier
+# and the machine that runs image/sign.sh. File-mode change leaves its SHA256
+# and the deterministic ISO payload unchanged.
+chmod 0644 "$OUT/filesystem.squashfs.verity"
 cp "$ROOT/boot/vmlinuz-$KVER" "$OUT/vmlinuz"
 cp "$ROOT/boot/initrd.img-$KVER" "$OUT/initrd.img"
 echo "$ROOTHASH" > "$OUT/ROOTHASH"

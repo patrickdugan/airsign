@@ -26,12 +26,15 @@ Offline machine:
 Online machine (with a watch-only wallet such as Bitcoin Core):
   airsign descriptors ACCOUNT          print descriptors + importdescriptors JSON
   airsign request  --network N --psbt P
-  airsign combine  --psbt P --signatures S [--psbt-out FILE]
+  airsign combine  --psbt P --signatures S [--psbt-out FILE] [--psbt-out-format base64|binary]
   airsign inspect  FRAME
   airsign show     FRAME [--format words|minimal|as1|qr] [--pbm FILE]
 
 Frames (ACCOUNT, R, S, FRAME) are an AS1... string or a word transcript.
-Any value can be @FILE to read it from a file, or - for stdin.
+Use --psbt @FILE for binary Sparrow/Core .psbt files or Base64 text files.
+Use --psbt - to read binary or Base64 PSBT data from stdin.
+The default --psbt-out format is Base64; choose binary for Sparrow .psbt import.
+Other frame values can be @FILE for UTF-8 text or - for stdin.
 Output format for commands that emit a frame: --format all|as1|words|minimal|qr
 ";
 
@@ -48,7 +51,7 @@ struct Args {
 
 const VALUE_FLAGS: &[&str] = &[
     "mnemonic-file", "passphrase-file", "network", "account", "request", "psbt", "signatures", "psbt-out",
-    "pbm", "words", "dice", "dice-only", "format", "camera",
+    "pbm", "words", "dice", "dice-only", "format", "camera", "psbt-out-format",
 ];
 
 impl Args {
@@ -98,6 +101,46 @@ fn load(v: &str) -> Res<String> {
         return std::fs::read_to_string(p).map_err(|e| CodecError(format!("{p}: {e}")));
     }
     Ok(v.to_string())
+}
+
+const MAX_PSBT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The online helper accepts the binary PSBT serialization written by Sparrow
+/// as well as Base64 text exported by Sparrow or Bitcoin Core. The signer never
+/// sees this file; it receives only the compact, reviewed AS1 request.
+fn decode_psbt_bytes(data: &[u8]) -> Res<Psbt> {
+    if data.len() > MAX_PSBT_BYTES {
+        return fail(format!("PSBT exceeds {} bytes", MAX_PSBT_BYTES));
+    }
+    if data.starts_with(b"psbt\xff") {
+        return Psbt::deserialize(data).map_err(|e| CodecError(format!("binary PSBT: {e}")));
+    }
+    let s = std::str::from_utf8(data)
+        .map_err(|_| CodecError("PSBT must be binary psbt\\xff or UTF-8 Base64".into()))?;
+    Psbt::from_str(s.trim()).map_err(|e| CodecError(format!("Base64 PSBT: {e}")))
+}
+
+fn load_psbt(v: &str) -> Res<Psbt> {
+    if v == "-" {
+        let mut data = Vec::new();
+        std::io::stdin()
+            .take((MAX_PSBT_BYTES + 1) as u64)
+            .read_to_end(&mut data)
+            .map_err(|e| CodecError(format!("PSBT stdin: {e}")))?;
+        return decode_psbt_bytes(&data);
+    }
+    if let Some(path) = v.strip_prefix('@') {
+        if path.is_empty() {
+            return fail("missing PSBT filename after @");
+        }
+        let meta = std::fs::metadata(path).map_err(|e| CodecError(format!("{path}: {e}")))?;
+        if meta.len() > MAX_PSBT_BYTES as u64 {
+            return fail(format!("PSBT exceeds {} bytes", MAX_PSBT_BYTES));
+        }
+        let data = std::fs::read(path).map_err(|e| CodecError(format!("{path}: {e}")))?;
+        return decode_psbt_bytes(&data);
+    }
+    decode_psbt_bytes(v.as_bytes())
 }
 
 fn load_wallet(a: &Args) -> Res<Wallet> {
@@ -228,19 +271,25 @@ fn run(raw: Vec<String>) -> Res<()> {
         }
         "request" => {
             let net = parse_network(a.need("network")?)?;
-            let psbt = Psbt::from_str(load(a.need("psbt")?)?.trim()).map_err(|e| CodecError(format!("PSBT: {e}")))?;
+            let psbt = load_psbt(a.need("psbt")?)?;
             let secp = Secp256k1::verification_only();
             let req = SignRequest::from_psbt(&secp, &psbt, net)?;
             print_request(&req);
             emit(&req.encode(), &a)?;
         }
         "combine" => {
-            let mut psbt =
-                Psbt::from_str(load(a.need("psbt")?)?.trim()).map_err(|e| CodecError(format!("PSBT: {e}")))?;
+            let mut psbt = load_psbt(a.need("psbt")?)?;
             let sigs = decode_signatures(&frame::parse_text(&load(a.need("signatures")?)?)?)?;
             let tx = combine(&mut psbt, &sigs)?;
             if let Some(p) = a.get("psbt-out") {
-                std::fs::write(p, psbt.to_string()).map_err(|e| CodecError(format!("{p}: {e}")))?;
+                let data = match a.get("psbt-out-format").unwrap_or("base64") {
+                    "base64" => psbt.to_string().into_bytes(),
+                    "binary" => psbt.serialize(),
+                    other => return fail(format!("unknown --psbt-out-format '{other}'")),
+                };
+                std::fs::write(p, data).map_err(|e| CodecError(format!("{p}: {e}")))?;
+            } else if a.has("psbt-out-format") {
+                return fail("--psbt-out-format requires --psbt-out");
             }
             println!("{}", serialize_hex(&tx));
             eprintln!("txid {}", tx.compute_txid());
@@ -293,5 +342,36 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod psbt_import_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_identical_binary_and_base64_psbts() {
+        let unsigned = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint::null(),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence::MAX,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(500),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        };
+        let psbt = Psbt::from_unsigned_tx(unsigned).unwrap();
+        let binary = psbt.serialize();
+        assert!(binary.starts_with(b"psbt\xff"));
+        assert_eq!(decode_psbt_bytes(&binary).unwrap(), psbt);
+        assert_eq!(decode_psbt_bytes(psbt.to_string().as_bytes()).unwrap(), psbt);
+        assert!(decode_psbt_bytes(b"psbt\xff").is_err());
+        assert!(decode_psbt_bytes(&vec![0u8; MAX_PSBT_BYTES + 1]).is_err());
+        assert!(decode_psbt_bytes(b"not a PSBT").is_err());
     }
 }

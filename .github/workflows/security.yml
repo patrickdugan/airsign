@@ -1,0 +1,32 @@
+name: Airsign security checks
+
+on:
+  push:
+    branches: [main, 'security/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Rust unit tests
+        run: cargo +stable test --locked
+      - name: Dev-feature unit tests
+        run: cargo +stable test --locked --all-features
+      - name: Release-profile build
+        run: cargo +stable build --release --locked
+      - name: Fail-closed isolation fault injection
+        run: python3 scripts/test_fail_closed.py
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' path; do
+            case "$(head -n 1 "$path")" in
+              '#!/bin/bash'|'#!/usr/bin/bash'|'#!/usr/bin/env bash') bash -n "$path" ;;
+              '#!/bin/sh'|'#!/usr/bin/sh'|'#!/usr/bin/env sh') sh -n "$path" ;;
+            esac
+          done < <(find image scripts -type f -print0)

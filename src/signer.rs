@@ -23,7 +23,7 @@ use crate::request::{xonly_of_p2tr, Dest, KeyPath, SignRequest};
 
 /// Change or receive index above this draws a warning: a coordinator can hide
 /// change at an index the user's wallet will never scan ("ransom" change).
-pub const HIGH_INDEX_WARNING: u32 = 10_000;
+pub const HIGH_INDEX_WARNING: u32 = 1_000;
 
 pub struct Wallet {
     secp: Secp256k1<All>,
@@ -72,8 +72,9 @@ impl Wallet {
     }
 
     pub fn account_export(&self, network: Network, account: u32) -> Account {
-        let x = self.account_xpriv(network, account);
+        let mut x = self.account_xpriv(network, account);
         let xpub = Xpub::from_priv(&self.secp, &x);
+        x.private_key.non_secure_erase();
         Account {
             network,
             master_fp: self.fp,
@@ -89,8 +90,12 @@ impl Wallet {
             ChildNumber::from_normal_idx(path.change as u32).unwrap(),
             ChildNumber::from_normal_idx(path.index).expect("index < 2^31"),
         ];
-        let x = self.account_xpriv(network, account).derive_priv(&self.secp, &tail).expect("derivation");
-        Keypair::from_secret_key(&self.secp, &x.private_key)
+        let mut account_key = self.account_xpriv(network, account);
+        let mut child = account_key.derive_priv(&self.secp, &tail).expect("derivation");
+        account_key.private_key.non_secure_erase();
+        let pair = Keypair::from_secret_key(&self.secp, &child.private_key);
+        child.private_key.non_secure_erase();
+        pair
     }
 
     pub fn internal_key(&self, network: Network, account: u32, path: KeyPath) -> XOnlyPublicKey {
@@ -99,6 +104,13 @@ impl Wallet {
 
     pub fn own_script(&self, network: Network, account: u32, path: KeyPath) -> ScriptBuf {
         ScriptBuf::new_p2tr(&self.secp, self.internal_key(network, account, path), None)
+    }
+
+    /// The address to verify against an online coordinator before funding.
+    /// Derive it locally from the same key path used when signing.
+    pub fn receive_address(&self, network: Network, account: u32, index: u32) -> Address {
+        let script = self.own_script(network, account, KeyPath { change: false, index });
+        Address::from_script(&script, network).expect("BIP86 has a standard receiving address")
     }
 
     /// BIP32 extended private key descriptor for the account, so a test can
@@ -303,4 +315,26 @@ pub fn sign(w: &Wallet, req: &SignRequest, rv: &Review) -> Result<Vec<schnorr::S
         sigs.push(sig);
     }
     Ok(sigs)
+}
+
+#[cfg(test)]
+mod bip86_address_tests {
+    use super::*;
+
+    #[test]
+    fn receiving_address_matches_bip86_reference_vector() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        ).unwrap();
+        let w = Wallet::from_mnemonic(&m, "");
+        // BIP86 official test vectors, first two receive addresses.
+        assert_eq!(
+            w.receive_address(Network::Bitcoin, 0, 0).to_string(),
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+        );
+        assert_eq!(
+            w.receive_address(Network::Bitcoin, 0, 1).to_string(),
+            "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh",
+        );
+    }
 }

@@ -135,8 +135,8 @@ machine with no camera, or for a policy of no USB devices beyond a keyboard.
 * Keygen uses the OS RNG, optionally mixed with dice. In dice-only mode the seed
   is SHA-256 of the rolls (Coldcard's rule), so it can be checked on another
   computer with `printf %s ROLLS | sha256sum`. Standard SeedQR output and input
-  are supported. The user must re-type three random words before the seed is
-  accepted.
+  are supported. The user must re-enter every word from the physical backup before the
+  watch-only account can be exported.
 
 ## Why not just run Bitcoin-Qt offline?
 
@@ -333,3 +333,26 @@ modify its own verifier too.
   unmounted and freed too.
 * Camera scanning (`zbarcam`) is wired in but untested on real hardware. The
   QEMU suite covers QR *display* and keyboard entry, not webcam input.
+
+## Security release gate
+
+The production signer now depends on a verified-boot preflight, USBGuard,
+and successful USB-storage driver unloading. The preflight checks Secure Boot
+and the active dm-verity root against the signed kernel command line.
+Verification failure must prevent signing even if emergency poweroff fails.
+Owner-key-only enrollment remains an operator responsibility until it can
+be attested reliably on physical hardware.
+
+Every release must be rebuilt from its exact Git commit using the pinned
+snapshot. An independent rebuilder should compare all artifacts and the
+`ROOTHASH`; the published `image/SHA256SUMS` and `image/ROOTHASH` must be
+updated before signing. A source change invalidates the previous hashes.
+`image/sign.sh` refuses stale builds, mismatched manifests, and altered files.
+
+Seed creation now requires full re-entry of the physical backup before
+exporting a watch-only account. Verify actual recovery and a small test
+transaction on signet before holding mainnet funds.
+
+Further work: real-firmware Secure Boot enforcement, TPM anti-evil-maid
+verification, independently reproduced builds, controlled RAM shutdown
+behavior, and an external review of the transport and signer.

@@ -9,7 +9,7 @@ use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{Transaction, TxOut, Witness};
 
 use crate::codec::{err, put_uleb, CodecError, LINE_BYTES};
-use crate::request::xonly_of_p2tr;
+use crate::request::{spent_output_from_psbt, xonly_of_p2tr};
 
 fn spent_outputs(psbt: &Psbt) -> Result<Vec<TxOut>, CodecError> {
     psbt.unsigned_tx
@@ -17,15 +17,7 @@ fn spent_outputs(psbt: &Psbt) -> Result<Vec<TxOut>, CodecError> {
         .iter()
         .zip(&psbt.inputs)
         .enumerate()
-        .map(|(n, (txin, pin))| match (&pin.witness_utxo, &pin.non_witness_utxo) {
-            (Some(w), _) => Ok(w.clone()),
-            (None, Some(prev)) => prev
-                .output
-                .get(txin.previous_output.vout as usize)
-                .cloned()
-                .ok_or_else(|| CodecError(format!("input {n}: outpoint index out of range"))),
-            _ => err(format!("input {n}: PSBT lacks the spent output")),
-        })
+        .map(|(n, (txin, pin))| spent_output_from_psbt(txin, pin, n))
         .collect()
 }
 

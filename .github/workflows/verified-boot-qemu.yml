@@ -1,0 +1,65 @@
+# Runs the exact signed-candidate boot test in emulated UEFI Secure Boot.
+# All Secure Boot keys here are temporary test keys, NEVER production keys.
+name: Airsign Secure Boot QEMU self-test
+
+on:
+  push:
+    branches: ['security/**']
+    paths: ['.github/workflows/verified-boot-qemu.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-ovmf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned-builder prerequisites and QEMU test utilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            debootstrap debian-archive-keyring \
+            qemu-system-x86 ovmf python3-virt-firmware \
+            zbar-tools xorriso sbsigntool python3-pefile efitools \
+            mtools dosfstools faketime openssl
+          command -v virt-fw-vars
+          test -r /usr/share/OVMF/OVMF_CODE_4M.secboot.fd
+          test -r /usr/share/OVMF/OVMF_VARS_4M.fd
+      - name: Compile local QR/helper binary
+        run: cargo +stable build --release --locked
+      - name: Build candidate image at checkout commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo env WORK="$RUNNER_TEMP/airsign-repro-qemu" \
+            bash image/build.sh "$RUNNER_TEMP/airsign-candidate"
+          diff -u image/ROOTHASH "$RUNNER_TEMP/airsign-candidate/ROOTHASH"
+          diff -u image/SHA256SUMS "$RUNNER_TEMP/airsign-candidate/SHA256SUMS"
+          (cd "$RUNNER_TEMP/airsign-candidate" && sudo sha256sum --check "$GITHUB_WORKSPACE/image/SHA256SUMS")
+      - name: Generate ephemeral test-only owner and attacker Secure Boot keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/airsign-keys"
+          bash image/keys.sh "$RUNNER_TEMP/airsign-keys/owner" "airsign CI test owner"
+          bash image/keys.sh "$RUNNER_TEMP/airsign-keys/attacker" "airsign CI negative fixture"
+      - name: Signed UEFI Secure Boot image self-test
+        shell: bash
+        env:
+          AIRSIGN: ${{ github.workspace }}/target/release/airsign
+          OVMF_SMM: '1'
+          QEMU_ACCEL: tcg
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/airsign-qemu"
+          python3 image/test_qemu.py \
+            "$RUNNER_TEMP/airsign-candidate" \
+            "$RUNNER_TEMP/airsign-keys" \
+            "$RUNNER_TEMP/airsign-qemu" S
+          echo "Signed firmware self-test succeeded; physical boot and signet remain gates."

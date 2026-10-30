@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs before USBGuard. The session is only amnesic if the whole system lives in
 # RAM: once USBGuard refuses the boot stick, nothing may still be reading it.
-set -u
+set -euo pipefail
 
 say() {
   echo "airsign-lockdown: $*"
@@ -12,7 +12,9 @@ say() {
 # If it could not (too little RAM), /run/live/medium is still the stick itself.
 src=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null || true)
 fstype=$(findmnt -n -o FSTYPE /run/live/medium 2>/dev/null || true)
-if [ -n "$src" ] && [ "$fstype" != tmpfs ] && [ -b "$src" ]; then
+# Require proof that live-boot actually copied the image into RAM.
+if ! grep -Eq '(^|[[:space:]])toram([[:space:]]|$)' /proc/cmdline || \
+   [ -z "$src" ] || [ "$fstype" != tmpfs ]; then
   say "airsign could not copy itself into memory (is there at least 2 GB of RAM?)."
   say "Refusing to start: the boot stick would still be in use. Powering off in 60 s."
   sleep 60
@@ -29,7 +31,10 @@ install uas /bin/false
 EOF
 # udevd caches the modprobe configuration; make it pick up the block above, or
 # it would reload the drivers for the next storage device it sees.
-udevadm control --reload 2>/dev/null || true
+if ! udevadm control --reload >/dev/null 2>&1; then
+  say "udev did not reload the USB-storage block policy; refusing to start."
+  exit 1
+fi
 # The drivers themselves are unloaded by unload-storage.sh, after USBGuard has
 # refused the boot stick: until then the stick is authorized and udev would
 # simply probe it again.
